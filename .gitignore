@@ -1,0 +1,13 @@
+# Self-contained tooling — never commit
+.venv/
+bin/
+__pycache__/
+*.pyc
+
+# Working/output folders
+uploads/
+output/
+temp/
+
+# OS
+.DS_Store

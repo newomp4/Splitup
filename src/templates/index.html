@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Splitup</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">SPLITUP</div>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <main>
+    <!-- Step 1: drop -->
+    <section id="drop" class="drop">
+      <div class="drop-inner">
+        <div class="drop-title">Drop a video here</div>
+        <div class="drop-sub">or</div>
+        <label class="btn">
+          Choose file
+          <input type="file" id="file" accept="video/*" hidden />
+        </label>
+        <div class="drop-hint">Horizontal source · any length</div>
+      </div>
+    </section>
+
+    <!-- Step 2: editor -->
+    <section id="editor" class="editor hidden">
+      <div class="left">
+        <div class="preview-wrap">
+          <div class="preview" id="preview">
+            <video id="bg" muted playsinline preload="auto"></video>
+            <div class="bg-dim" id="bgDim"></div>
+            <video id="fg" muted playsinline preload="auto" controls></video>
+            <div class="overlay-text" id="overlayText">Your title</div>
+          </div>
+        </div>
+        <div class="preview-controls">
+          <button class="btn small" id="seekStart">⏮ start</button>
+          <button class="btn small" id="seekEnd">end ⏭</button>
+          <span class="muted" id="segLabel">—</span>
+        </div>
+      </div>
+
+      <div class="right">
+        <div class="group">
+          <label class="lbl">Title (base)</label>
+          <input type="text" id="baseTitle" value="My Clip" />
+          <div class="hint muted">Used as the output folder name and the title prefix for each segment.</div>
+        </div>
+
+        <div class="group">
+          <label class="lbl">Clip length
+            <span class="val" id="targetVal">60s</span>
+          </label>
+          <input type="range" id="target" min="15" max="180" step="5" value="60" />
+        </div>
+
+        <div class="group">
+          <label class="lbl">Foreground scale
+            <span class="val" id="fgVal">95%</span>
+          </label>
+          <input type="range" id="fgScale" min="40" max="100" step="1" value="95" />
+        </div>
+
+        <div class="group">
+          <label class="lbl">Blur strength
+            <span class="val" id="blurVal">25</span>
+          </label>
+          <input type="range" id="blur" min="0" max="60" step="1" value="25" />
+        </div>
+
+        <div class="group">
+          <label class="lbl">Background dim
+            <span class="val" id="dimVal">0%</span>
+          </label>
+          <input type="range" id="bgDimRange" min="0" max="80" step="1" value="0" />
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="group">
+          <label class="lbl">Text size
+            <span class="val" id="textSizeVal">76px</span>
+          </label>
+          <input type="range" id="textSize" min="32" max="160" step="2" value="76" />
+        </div>
+
+        <div class="group row">
+          <div class="col">
+            <label class="lbl">Color</label>
+            <input type="color" id="textColor" value="#ffffff" />
+          </div>
+          <div class="col">
+            <label class="lbl">Position</label>
+            <select id="textPos">
+              <option value="top" selected>top</option>
+              <option value="center">center</option>
+              <option value="bottom">bottom</option>
+            </select>
+          </div>
+          <div class="col">
+            <label class="lbl">Offset</label>
+            <input type="number" id="textOffset" value="180" min="0" max="800" step="10" />
+          </div>
+        </div>
+
+        <div class="group">
+          <label class="check">
+            <input type="checkbox" id="textBox" checked />
+            <span>Translucent box behind text</span>
+          </label>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="actions">
+          <button class="btn" id="detectBtn">Detect scenes & build segments</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 3: segments -->
+    <section id="segments" class="segments hidden">
+      <div class="segments-head">
+        <h2>Segments <span class="muted" id="segCount"></span></h2>
+        <div class="actions">
+          <button class="btn small ghost" id="rebuildBtn">Rebuild</button>
+          <button class="btn primary" id="renderBtn">Render all</button>
+        </div>
+      </div>
+      <div class="seg-list" id="segList"></div>
+    </section>
+
+    <!-- Step 4: progress -->
+    <section id="progress" class="progress hidden">
+      <h2>Rendering</h2>
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-meta">
+        <span id="progressText">—</span>
+        <span class="muted" id="progressCurrent"></span>
+      </div>
+      <div id="errors" class="errors"></div>
+      <div class="actions">
+        <button class="btn" id="revealBtn" disabled>Open output folder</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="loader" class="loader hidden">
+    <div class="loader-text" id="loaderText">working…</div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
