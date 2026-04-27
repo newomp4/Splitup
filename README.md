@@ -26,10 +26,13 @@ The first run will download `ffmpeg`, `ffprobe`, and the Inter font into `./bin/
 - **Auto-split** at scene changes, target length tunable from 15 s to 180 s.
 - **Vertical 1080×1920 @ 30 fps** output.
 - **Blurred background** layer (Gaussian, sigma adjustable) — fills the frame, no black bars.
-- **Centered foreground** layer — same audio, scale adjustable (40 %–100 %).
-- **Editable title overlay** per clip: font size, color, position (top / center / bottom), offset, optional translucent box.
-- **Live preview** in the editor — slide a knob and see it update.
-- **Per-segment title editing** before render. Titles default to `My Clip Part 1`, `My Clip Part 2`, ….
+- **Centered foreground** layer, same audio. Scale **40 %–200 %**, so you can also crop *past* the edges if you want a bigger framing.
+- **Drop shadow** under the foreground — adjustable blur, opacity, X / Y offset.
+- **Editable title overlay** per clip: size, color, position (top / center / bottom), offset, optional translucent box. *What you see in the preview is the size that renders.*
+- **Word-by-word burned captions** (one-word style by default, or N words per line) using a local [faster-whisper](https://github.com/SYSTRAN/faster-whisper) Whisper model. Models are cached in `./bin/whisper-cache/`. Full styling: font size, color, outline color + width, shadow depth, position, vertical margin, bold, UPPERCASE.
+- **Live preview** of every setting (CSS-based — sliders update instantly). Caption preview shows the active word in real time as the video plays.
+- **Presets**: save your current settings to a local preset (lives in `./presets/`), or export as portable JSON for sharing or use in other programs. Last settings auto-restored on next launch.
+- **Per-segment title editing** before render. Titles default to `My Clip Part 1`, `My Clip Part 2`, …
 - **Output**: a folder named after the base title containing `My_Clip_Part_1.mp4`, `My_Clip_Part_2.mp4`, ….
 
 ## Folder layout
@@ -39,14 +42,17 @@ Splitup/
 ├── run.sh              # one-shot setup + launcher
 ├── requirements.txt
 ├── src/
-│   ├── app.py          # Flask backend + ffmpeg pipeline
+│   ├── app.py          # Flask backend + ffmpeg pipeline + transcription
 │   ├── templates/      # HTML
 │   └── static/         # CSS + JS frontend
-├── bin/                # ← downloaded ffmpeg, ffprobe, font (created on first run)
-├── .venv/              # ← Python virtualenv (created on first run)
-├── uploads/            # ← source videos (created on first run)
+├── bin/
+│   ├── ffmpeg, ffprobe, Inter-Bold.ttf
+│   └── whisper-cache/  # ← Whisper model files live here
+├── .venv/              # ← Python virtualenv
+├── uploads/            # ← source videos
 ├── output/             # ← rendered clip folders
-└── temp/               # scratch files
+├── presets/            # ← saved JSON presets
+└── temp/               # scratch files (transcripts cached here as <id>_words.json)
 ```
 
 `bin/`, `.venv/`, `uploads/`, `output/`, and `temp/` are gitignored. Delete any of them to reclaim space — the launcher rebuilds what it needs.
@@ -84,41 +90,64 @@ The preview pane is just two `<video>` elements stacked with CSS:
 
 The two videos share the same source URL and a `timeupdate` listener keeps them in sync. CSS blur is approximate but visually close to FFmpeg's `gblur` — enough to make decisions about layout.
 
-### 5. Render (FFmpeg pipeline)
+### 5. Captions (Whisper)
 
-Each segment becomes one FFmpeg invocation. The filter graph for one clip looks like:
+When captions are enabled, clicking **Transcribe** runs the audio through `faster-whisper` locally — it's a CTranslate2 port of OpenAI's Whisper, fast on CPU thanks to int8 quantization. The model file (default `base.en`, ~150 MB) is downloaded the first time and cached in `./bin/whisper-cache/`. The result is a list of `{word, start, end}` records, cached as JSON in `./temp/<video_id>_words.json` so re-renders are instant.
+
+At render time, for each segment, the relevant words are written into a generated **ASS subtitle file** with timestamps re-based to start at zero (because each clip is rendered with `-ss segment_start`). FFmpeg's `subtitles=` filter (libass) burns them into the video.
+
+The live caption preview in the browser is the same logic in JavaScript: a `timeupdate` listener finds which word's `[start, end]` range contains the current playback time and renders it on top of the preview with the user's chosen styling (CSS `text-shadow` is used to approximate the libass outline).
+
+### 6. Drop shadow
+
+The drop shadow under the foreground video is a small filter trick. We can't directly blur the alpha edge of the scaled foreground (that would soften the video too), so instead we synthesize a separate "shadow plate":
+
+```
+color=c=black@0.7:size=FG_W x FG_H:r=30:d=DUR,
+format=rgba,
+pad=iw+2*P:ih+2*P:P:P:color=#00000000,
+gblur=sigma=BLUR
+```
+
+— a black rectangle the size of the foreground, padded with transparent margin, then Gaussian-blurred so the dark color spreads into the transparent area. The padded transparent margin gives the blur somewhere to fade *into*; without it, the blur just smears within the box and you don't get a soft edge. This shadow plate is overlaid first, then the (sharp) foreground is overlaid on top.
+
+### 7. Render (FFmpeg pipeline)
+
+Each segment becomes one FFmpeg invocation. With everything turned on, the filter graph for one clip looks roughly like:
 
 ```
 [0:v] split=2 [bg][fg];
 
-[bg] scale=1080:1920:force_original_aspect_ratio=increase,
-     crop=1080:1920,
-     gblur=sigma=25,
-     eq=brightness=-0.10           [bgblur];
+[bg]  scale=1080:1920:force_original_aspect_ratio=increase,
+      crop=1080:1920,
+      gblur=sigma=25                 [bgblur];
 
-[fg] scale=1026:-2                 [fgs];
+[fg]  scale=1026:576                  [fgs];
 
-[bgblur][fgs] overlay=(W-w)/2:(H-h)/2,
-              drawtext=fontfile='bin/Inter-Bold.ttf':
-                       textfile='temp/...txt':
-                       fontcolor=white:fontsize=76:
-                       x=(w-text_w)/2:y=180:
-                       box=1:boxcolor=black@0.45:boxborderw=24,
-              fps=30,format=yuv420p
+color=c=black@0.7:size=1026x576:r=30:d=N,format=rgba,
+      pad=iw+90:ih+90:45:45:color=#00000000,
+      gblur=sigma=30                 [shadow];
+
+[bgblur][shadow]  overlay=...        [bgshadow];
+[bgshadow][fgs]   overlay=...        [stage1];
+
+[stage1] drawtext=fontfile='bin/Inter-Bold.ttf':textfile=...
+         :fontcolor=white:fontsize=76:x=...:y=...
+                                      [stage2];
+
+[stage2] subtitles='temp/seg.ass':fontsdir='bin'
+                                      [stage3];
+
+[stage3] fps=30,format=yuv420p        [final]
 ```
 
-Translation:
-- `split=2` duplicates the video into two streams (background and foreground).
-- The background is **scaled to fill** the 1080×1920 frame (`force_original_aspect_ratio=increase` + `crop`), so a 1920×1080 input becomes 3413×1920 then center-cropped to 1080×1920 — no letterboxing.
-- `gblur=sigma=25` is the Gaussian blur. Higher sigma = blurrier.
-- The foreground is scaled to a width that's a percentage of 1080 (`-2` means "auto-pick height to keep aspect ratio, rounded to even" — H.264 needs even dimensions).
-- `overlay=(W-w)/2:(H-h)/2` centers the foreground on the blurred background.
-- `drawtext` puts the title on top using a bundled Inter Bold font. The title is read from a temp text file (`textfile=…`) so we don't have to escape special characters in the title.
-- `fps=30,format=yuv420p` enforces 30 fps and the pixel format every player understands.
+Output is encoded with libx264 (CRF 20, "medium" preset) and AAC audio at 192 kbps. `+faststart` moves the MP4 metadata atoms to the start so the file plays as soon as it begins downloading.
 
-The output is encoded with libx264 (CRF 20, "medium" preset — good balance of quality and speed) and AAC audio at 192 kbps. `+faststart` puts the MOV atoms at the front so the file streams smoothly.
+### 8. Presets (JSON)
 
-### 6. Progress
+A preset is a JSON snapshot of every visual setting (foreground scale, blur, dim, title, drop shadow, captions, …). You can save them locally (`/api/presets`, written to `./presets/<name>.json`) or download as a portable file. Importing a JSON file just re-applies all settings into the form.
+
+### 9. Progress
 
 Renders run on a background thread. The browser polls `/api/render/<job_id>` every 800 ms and updates the progress bar segment-by-segment.
 
@@ -135,10 +164,10 @@ Renders run on a background thread. The browser polls `/api/render/<job_id>` eve
 
 ## Cleanup
 
-To wipe everything Splitup downloaded or generated:
+To wipe everything Splitup downloaded or generated (including the Whisper model):
 
 ```bash
-rm -rf .venv bin uploads output temp
+rm -rf .venv bin uploads output temp presets
 ```
 
 To wipe the entire project: just delete this folder.

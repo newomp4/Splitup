@@ -9,18 +9,21 @@ BIN="$ROOT/bin"
 FFMPEG="$BIN/ffmpeg"
 FFPROBE="$BIN/ffprobe"
 FONT="$BIN/Inter-Bold.ttf"
+WHISPER_CACHE="$BIN/whisper-cache"
 
-mkdir -p "$BIN" "$ROOT/uploads" "$ROOT/output" "$ROOT/temp"
+mkdir -p "$BIN" "$WHISPER_CACHE" "$ROOT/uploads" "$ROOT/output" "$ROOT/temp" "$ROOT/presets"
 
-# 1. Python venv (kept inside project dir)
+# 1. Python venv
 if [ ! -d "$VENV" ]; then
   echo "[setup] creating Python venv in .venv ..."
   python3 -m venv "$VENV"
   "$VENV/bin/pip" install --upgrade pip --quiet
-  "$VENV/bin/pip" install -r requirements.txt --quiet
 fi
 
-# 2. ffmpeg + ffprobe (universal macOS binaries from evermeet.cx)
+# Always reconcile deps — cheap if up to date
+"$VENV/bin/pip" install -q -r requirements.txt
+
+# 2. ffmpeg + ffprobe (universal macOS binaries)
 if [ ! -x "$FFMPEG" ]; then
   echo "[setup] downloading ffmpeg ..."
   curl -fL --silent --show-error "https://evermeet.cx/ffmpeg/getrelease/zip" -o "$BIN/ffmpeg.zip"
@@ -37,7 +40,7 @@ if [ ! -x "$FFPROBE" ]; then
   chmod +x "$FFPROBE"
 fi
 
-# 3. Bundled font for the text overlay (Inter Bold, free OFL license)
+# 3. Bundled font
 if [ ! -f "$FONT" ]; then
   echo "[setup] downloading font ..."
   curl -fL --silent --show-error \
@@ -45,6 +48,9 @@ if [ ! -f "$FONT" ]; then
     -o "$FONT"
 fi
 
-# 4. Run
+# 4. Run — point HuggingFace cache into project folder so model files stay contained
+export HF_HOME="$WHISPER_CACHE"
+export XDG_CACHE_HOME="$WHISPER_CACHE"
+
 echo "[run] launching Splitup at http://127.0.0.1:5005"
 exec "$VENV/bin/python" -m src.app

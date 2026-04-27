@@ -1,21 +1,30 @@
 """Splitup — local Flask app that turns a long horizontal video into a folder
-of vertical 1080x1920 clips with a Gaussian-blurred background, a centered
-foreground, and an editable text overlay per clip.
+of vertical 1080x1920 clips.
 
-Everything self-contained inside the project folder (./bin, ./.venv, ./uploads,
-./output, ./temp). Delete the folder = delete the app.
+Pipeline per clip:
+    source -> (split into bg + fg)
+    bg : scale-fill 1080x1920, gaussian blur, optional dim
+    fg : scale to fg_w x fg_h (can overflow past 1080)
+    optional drop shadow under fg
+    overlay fg centered
+    drawtext title
+    burn ASS captions (word-level whisper transcription)
+    fps=30, yuv420p
+    libx264 + aac
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import threading
+import time
 import uuid
 import webbrowser
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request, send_file, send_from_directory
+from flask import Flask, jsonify, render_template, request, send_file
 
 # ---------- paths ----------
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,13 +32,19 @@ BIN = ROOT / "bin"
 UPLOADS = ROOT / "uploads"
 OUTPUT = ROOT / "output"
 TEMP = ROOT / "temp"
+PRESETS = ROOT / "presets"
+WHISPER_CACHE = BIN / "whisper-cache"
 
 FFMPEG = str(BIN / "ffmpeg")
 FFPROBE = str(BIN / "ffprobe")
 FONT = str(BIN / "Inter-Bold.ttf")
 
-for d in (UPLOADS, OUTPUT, TEMP):
+for d in (UPLOADS, OUTPUT, TEMP, PRESETS, WHISPER_CACHE):
     d.mkdir(parents=True, exist_ok=True)
+
+# Keep model files inside the project folder
+os.environ.setdefault("HF_HOME", str(WHISPER_CACHE))
+os.environ.setdefault("XDG_CACHE_HOME", str(WHISPER_CACHE))
 
 # ---------- app ----------
 app = Flask(
@@ -37,10 +52,14 @@ app = Flask(
     template_folder=str(ROOT / "src" / "templates"),
     static_folder=str(ROOT / "src" / "static"),
 )
-app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024 * 1024  # 10 GB cap
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024 * 1024  # 10 GB
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
+
+TRANSCRIBE_JOBS: dict[str, dict] = {}
+TRANSCRIBE_LOCK = threading.Lock()
+WHISPER_MODEL = None  # lazy-loaded
 
 
 # ---------- helpers ----------
@@ -52,7 +71,6 @@ def find_source(vid: str) -> Path:
 
 
 def probe(path: Path) -> dict:
-    """Return width, height, fps, duration via ffprobe."""
     cmd = [
         FFPROBE, "-v", "error",
         "-select_streams", "v:0",
@@ -75,8 +93,6 @@ def safe_filename(name: str) -> str:
 
 
 def build_cuts(duration: float, target: float, scenes: list[float]) -> list[float]:
-    """Greedy splitter. Walks from 0; at each step picks the scene change in
-    [0.5x, 1.5x] of target ahead, otherwise hard-cuts at exactly target."""
     cuts = [0.0]
     while cuts[-1] < duration - 1.0:
         last = cuts[-1]
@@ -90,7 +106,6 @@ def build_cuts(duration: float, target: float, scenes: list[float]) -> list[floa
             cuts.append(min(duration, ideal))
     if cuts[-1] < duration:
         cuts[-1] = duration
-    # drop a tiny tail
     if len(cuts) >= 2 and (cuts[-1] - cuts[-2]) < max(2.0, target * 0.1):
         cuts[-2] = cuts[-1]
         cuts.pop()
@@ -125,15 +140,13 @@ def serve_source(vid):
 
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
-    """Run ffmpeg's scene detection. Returns timestamps of likely cut points."""
     data = request.json or {}
     vid = data["id"]
     threshold = float(data.get("threshold", 0.35))
     src = find_source(vid)
 
     cmd = [
-        FFMPEG, "-hide_banner",
-        "-i", str(src),
+        FFMPEG, "-hide_banner", "-i", str(src),
         "-vf", f"select='gt(scene,{threshold})',showinfo",
         "-an", "-f", "null", "-",
     ]
@@ -157,6 +170,109 @@ def make_segments():
     return jsonify({"segments": segs})
 
 
+# ---------- transcription ----------
+def words_cache_path(vid: str) -> Path:
+    return TEMP / f"{vid}_words.json"
+
+
+def get_whisper(model_size: str = "base.en"):
+    """Load the model lazily — first call takes a while (download + load)."""
+    global WHISPER_MODEL
+    if WHISPER_MODEL is None or WHISPER_MODEL[0] != model_size:
+        from faster_whisper import WhisperModel
+        m = WhisperModel(
+            model_size,
+            device="cpu",
+            compute_type="int8",
+            download_root=str(WHISPER_CACHE),
+        )
+        WHISPER_MODEL = (model_size, m)
+    return WHISPER_MODEL[1]
+
+
+@app.route("/api/transcribe", methods=["POST"])
+def start_transcribe():
+    data = request.json or {}
+    vid = data["id"]
+    model_size = data.get("model", "base.en")
+
+    cache = words_cache_path(vid)
+    if cache.exists():
+        return jsonify({"job_id": "cached", "cached": True})
+
+    job_id = uuid.uuid4().hex[:12]
+    with TRANSCRIBE_LOCK:
+        TRANSCRIBE_JOBS[job_id] = {"status": "queued", "progress": 0.0, "msg": "starting"}
+    threading.Thread(target=transcribe_job, args=(job_id, vid, model_size), daemon=True).start()
+    return jsonify({"job_id": job_id, "cached": False})
+
+
+@app.route("/api/transcribe/<job_id>")
+def transcribe_status(job_id):
+    if job_id == "cached":
+        return jsonify({"status": "done"})
+    with TRANSCRIBE_LOCK:
+        return jsonify(TRANSCRIBE_JOBS.get(job_id, {"status": "unknown"}))
+
+
+@app.route("/api/words/<vid>")
+def get_words(vid):
+    p = words_cache_path(vid)
+    if not p.exists():
+        return jsonify({"words": [], "ready": False})
+    return jsonify({"words": json.loads(p.read_text()), "ready": True})
+
+
+def transcribe_job(job_id: str, vid: str, model_size: str):
+    def update(**kw):
+        with TRANSCRIBE_LOCK:
+            TRANSCRIBE_JOBS[job_id].update(kw)
+
+    try:
+        update(status="running", msg="loading model")
+        src = find_source(vid)
+
+        # extract audio to 16kHz mono wav for whisper
+        audio = TEMP / f"{vid}.wav"
+        if not audio.exists():
+            update(msg="extracting audio")
+            subprocess.run(
+                [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+                 "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
+                 "-c:a", "pcm_s16le", str(audio)],
+                check=True,
+            )
+
+        update(msg="loading whisper model (first run downloads ~150 MB)")
+        model = get_whisper(model_size)
+
+        update(msg="transcribing")
+        meta = probe(src)
+        total = meta.get("duration", 0) or 1.0
+
+        segments, info = model.transcribe(
+            str(audio),
+            word_timestamps=True,
+            vad_filter=True,
+            beam_size=1,
+        )
+        words: list[dict] = []
+        for seg in segments:
+            for w in (seg.words or []):
+                words.append({
+                    "word": w.word.strip(),
+                    "start": float(w.start),
+                    "end": float(w.end),
+                })
+            update(progress=min(0.99, seg.end / total), msg=f"transcribing {seg.end:.0f}s/{total:.0f}s")
+
+        words_cache_path(vid).write_text(json.dumps(words))
+        update(status="done", progress=1.0, msg="done", count=len(words))
+    except Exception as e:
+        update(status="error", msg=str(e))
+
+
+# ---------- render ----------
 @app.route("/api/render", methods=["POST"])
 def start_render():
     data = request.json or {}
@@ -186,7 +302,6 @@ def render_status(job_id):
 
 @app.route("/api/reveal", methods=["POST"])
 def reveal():
-    """Open Finder at the output folder."""
     data = request.json or {}
     path = Path(data.get("path", str(OUTPUT)))
     if not path.exists():
@@ -195,14 +310,94 @@ def reveal():
     return jsonify({"ok": True})
 
 
-# ---------- render ----------
+# ---------- ASS subtitle helpers ----------
+def hex_to_ass_color(hex_str: str) -> str:
+    """#RRGGBB -> &H00BBGGRR (ASS uses BGR; alpha 00 = opaque)."""
+    h = (hex_str or "#FFFFFF").lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    h = (h + "ffffff")[:6]
+    r, g, b = h[0:2], h[2:4], h[4:6]
+    return f"&H00{b}{g}{r}".upper()
+
+
+def ass_time(t: float) -> str:
+    if t < 0: t = 0
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = t - h * 3600 - m * 60
+    return f"{h}:{m:02d}:{s:05.2f}"
+
+
+def words_to_ass(
+    words: list[dict],
+    seg_start: float, seg_end: float,
+    cap: dict,
+) -> str:
+    """Build an ASS subtitle file containing the words that fall within the
+    segment, with timestamps re-based to start at 0 (since segments are rendered
+    with -ss seg_start)."""
+    font = cap.get("font", "Inter")
+    size = int(cap.get("size", 110))
+    primary = hex_to_ass_color(cap.get("color", "#FFFFFF"))
+    outline_color = hex_to_ass_color(cap.get("outline_color", "#000000"))
+    outline_w = int(cap.get("outline", 4))
+    shadow_d = int(cap.get("shadow", 2))
+    bold = 1 if cap.get("bold", True) else 0
+    italic = 1 if cap.get("italic", False) else 0
+    align_map = {"top": 8, "center": 5, "bottom": 2}
+    align = align_map.get(cap.get("position", "center"), 5)
+    margin_v = int(cap.get("margin_v", 700))
+    words_per_line = max(1, int(cap.get("words_per_line", 1)))
+    uppercase = bool(cap.get("uppercase", False))
+
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,{font},{size},{primary},{outline_color},&H00000000,{bold},{italic},0,0,100,100,0,0,1,{outline_w},{shadow_d},{align},60,60,{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    # Filter to segment range and rebase to seg-relative time
+    in_seg = [w for w in words if w["end"] > seg_start and w["start"] < seg_end]
+    lines = []
+
+    if words_per_line == 1:
+        for w in in_seg:
+            start = max(0.0, w["start"] - seg_start)
+            end = min(seg_end - seg_start, w["end"] - seg_start)
+            if end - start < 0.05:
+                end = start + 0.05
+            text = w["word"].strip()
+            if uppercase:
+                text = text.upper()
+            text = text.replace("\n", "\\N").replace("{", "(").replace("}", ")")
+            lines.append(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{text}")
+    else:
+        # group words_per_line at a time, span from first.start to last.end
+        for i in range(0, len(in_seg), words_per_line):
+            grp = in_seg[i : i + words_per_line]
+            if not grp: continue
+            start = max(0.0, grp[0]["start"] - seg_start)
+            end = min(seg_end - seg_start, grp[-1]["end"] - seg_start)
+            text = " ".join(g["word"].strip() for g in grp)
+            if uppercase: text = text.upper()
+            text = text.replace("\n", "\\N").replace("{", "(").replace("}", ")")
+            lines.append(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{text}")
+
+    return header + "\n".join(lines) + "\n"
+
+
+# ---------- the actual render ----------
 def render_job(job_id: str, vid: str, segments: list[dict], settings: dict):
-    """Render one clip per segment using a single ffmpeg invocation each.
-    Filter chain:
-      input -> split -> [bg: scale-to-fill, crop, gaussian blur]
-                     -> [fg: scale to fg_scale * 1080 width]
-      overlay fg centered, then drawtext for the title.
-    """
     try:
         src = find_source(vid)
     except FileNotFoundError:
@@ -211,21 +406,41 @@ def render_job(job_id: str, vid: str, segments: list[dict], settings: dict):
             JOBS[job_id]["errors"].append("source video missing")
         return
 
+    src_meta = probe(src)
+    src_w, src_h = src_meta["width"], src_meta["height"]
+
     base = settings.get("base_title", "Clip")
     out_dir = OUTPUT / safe_filename(base)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    fg_scale = max(0.3, min(1.0, float(settings.get("fg_scale", 0.95))))
+    # ----- settings -----
+    fg_scale = max(0.3, min(2.0, float(settings.get("fg_scale", 0.95))))
     blur = max(0.0, float(settings.get("blur", 25)))
     bg_dim = max(0.0, min(0.9, float(settings.get("bg_dim", 0.0))))
+
     text_size = int(settings.get("text_size", 76))
     text_color = settings.get("text_color", "white")
-    text_pos = settings.get("text_pos", "top")  # top | center | bottom
+    text_pos = settings.get("text_pos", "top")
     text_offset = int(settings.get("text_offset", 180))
     text_box = bool(settings.get("text_box", True))
+    show_title = bool(settings.get("show_title", True))
+
+    # drop shadow on fg
+    sh = settings.get("shadow") or {}
+    sh_on = bool(sh.get("enabled", False))
+    sh_blur = max(1.0, float(sh.get("blur", 30)))
+    sh_op = max(0.0, min(1.0, float(sh.get("opacity", 0.6))))
+    sh_offx = int(sh.get("offset_x", 0))
+    sh_offy = int(sh.get("offset_y", 12))
+
+    # captions
+    cap = settings.get("captions") or {}
+    cap_on = bool(cap.get("enabled", False))
 
     out_w, out_h = 1080, 1920
-    fg_w = int(out_w * fg_scale) & ~1  # round to even
+    fg_w = int(out_w * fg_scale) & ~1
+    fg_h = int(round(fg_w * src_h / src_w))
+    if fg_h % 2: fg_h -= 1
 
     if text_pos == "top":
         ty = f"{text_offset}"
@@ -233,6 +448,13 @@ def render_job(job_id: str, vid: str, segments: list[dict], settings: dict):
         ty = f"h-text_h-{text_offset}"
     else:
         ty = "(h-text_h)/2"
+
+    # words for caption rendering
+    words: list[dict] = []
+    if cap_on:
+        wp = words_cache_path(vid)
+        if wp.exists():
+            words = json.loads(wp.read_text())
 
     with JOBS_LOCK:
         JOBS[job_id]["status"] = "running"
@@ -246,45 +468,90 @@ def render_job(job_id: str, vid: str, segments: list[dict], settings: dict):
         with JOBS_LOCK:
             JOBS[job_id]["current"] = title
 
-        # textfile= avoids drawtext escaping pain entirely
-        text_file = TEMP / f"{job_id}_{i}.txt"
-        text_file.write_text(title, encoding="utf-8")
+        # -- title text file (avoids drawtext escaping pain) --
+        title_file = TEMP / f"{job_id}_{i}_title.txt"
+        title_file.write_text(title, encoding="utf-8")
 
-        bg_chain = (
-            f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
-            f"crop={out_w}:{out_h}"
-        )
+        # -- caption ASS file --
+        ass_file = None
+        if cap_on and words:
+            ass_file = TEMP / f"{job_id}_{i}.ass"
+            ass_file.write_text(words_to_ass(words, start, float(seg["end"]), cap), encoding="utf-8")
+
+        # ===== build filter graph =====
+        parts = []
+
+        # bg + fg split
+        bg_chain = (f"[0:v]split=2[bg][fg]; "
+                    f"[bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+                    f"crop={out_w}:{out_h}")
         if blur > 0:
             bg_chain += f",gblur=sigma={blur}"
         if bg_dim > 0:
             bg_chain += f",eq=brightness=-{bg_dim:.2f}"
+        bg_chain += "[bgblur]"
+        parts.append(bg_chain)
 
-        drawtext = (
-            f"drawtext=fontfile='{FONT}':"
-            f"textfile='{text_file}':"
-            f"reload=0:"
-            f"fontcolor={text_color}:"
-            f"fontsize={text_size}:"
-            f"x=(w-text_w)/2:y={ty}"
+        # fg scaled
+        parts.append(f"[fg]scale={fg_w}:{fg_h}[fgs]")
+
+        # drop shadow
+        if sh_on:
+            sh_pad = max(int(sh_blur * 3), 20)
+            parts.append(
+                f"color=c=black@{sh_op:.2f}:size={fg_w}x{fg_h}:r=30:d={dur+1:.2f},"
+                f"format=rgba,"
+                f"pad=iw+2*{sh_pad}:ih+2*{sh_pad}:{sh_pad}:{sh_pad}:color=#00000000,"
+                f"gblur=sigma={sh_blur}[shadow]"
+            )
+            parts.append(
+                f"[bgblur][shadow]overlay="
+                f"x=(W-({fg_w}+2*{sh_pad}))/2+{sh_offx}:"
+                f"y=(H-({fg_h}+2*{sh_pad}))/2+{sh_offy}[bgshadow]"
+            )
+            bg_label = "bgshadow"
+        else:
+            bg_label = "bgblur"
+
+        # fg overlay
+        parts.append(
+            f"[{bg_label}][fgs]overlay="
+            f"x=(W-{fg_w})/2:"
+            f"y=(H-{fg_h})/2[stage1]"
         )
-        if text_box:
-            drawtext += ":box=1:boxcolor=black@0.45:boxborderw=24"
+        last = "stage1"
 
-        filter_complex = (
-            f"[0:v]split=2[bg][fg];"
-            f"[bg]{bg_chain}[bgblur];"
-            f"[fg]scale={fg_w}:-2[fgs];"
-            f"[bgblur][fgs]overlay=(W-w)/2:(H-h)/2,"
-            f"{drawtext},"
-            f"fps=30,format=yuv420p"
-        )
+        # title text
+        if show_title:
+            dt = (
+                f"drawtext=fontfile='{FONT}':"
+                f"textfile='{title_file}':"
+                f"fontcolor={text_color}:"
+                f"fontsize={text_size}:"
+                f"x=(w-text_w)/2:y={ty}"
+            )
+            if text_box:
+                dt += ":box=1:boxcolor=black@0.45:boxborderw=24"
+            parts.append(f"[{last}]{dt}[stage2]")
+            last = "stage2"
 
+        # captions
+        if ass_file:
+            # subtitles= path: forward-slashes are OK on macOS, no special chars expected
+            parts.append(f"[{last}]subtitles='{ass_file}':fontsdir='{BIN}'[stage3]")
+            last = "stage3"
+
+        parts.append(f"[{last}]fps=30,format=yuv420p[final]")
+
+        filter_complex = "; ".join(parts)
         out_file = out_dir / f"{safe_filename(title)}.mp4"
+
         cmd = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
             "-ss", f"{start:.3f}", "-i", str(src),
             "-t", f"{dur:.3f}",
             "-filter_complex", filter_complex,
+            "-map", "[final]", "-map", "0:a?",
             "-c:v", "libx264", "-preset", "medium", "-crf", "20",
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
@@ -294,23 +561,56 @@ def render_job(job_id: str, vid: str, segments: list[dict], settings: dict):
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode != 0:
                 with JOBS_LOCK:
-                    JOBS[job_id]["errors"].append(
-                        f"{title}: {r.stderr.strip()[-400:]}"
-                    )
+                    JOBS[job_id]["errors"].append(f"{title}: {r.stderr.strip()[-500:]}")
         except Exception as e:
             with JOBS_LOCK:
                 JOBS[job_id]["errors"].append(f"{title}: {e}")
         finally:
-            try:
-                text_file.unlink()
-            except OSError:
-                pass
+            for f in (title_file, ass_file):
+                if f and f.exists():
+                    try: f.unlink()
+                    except OSError: pass
 
         with JOBS_LOCK:
             JOBS[job_id]["done"] = i
 
     with JOBS_LOCK:
         JOBS[job_id]["status"] = "done"
+
+
+# ---------- presets ----------
+@app.route("/api/presets", methods=["GET"])
+def list_presets():
+    items = []
+    for f in sorted(PRESETS.glob("*.json")):
+        items.append({"name": f.stem, "path": str(f)})
+    return jsonify({"presets": items})
+
+
+@app.route("/api/presets", methods=["POST"])
+def save_preset_to_disk():
+    data = request.json or {}
+    name = safe_filename(data.get("name", "preset"))
+    body = data.get("settings", {})
+    p = PRESETS / f"{name}.json"
+    p.write_text(json.dumps(body, indent=2))
+    return jsonify({"ok": True, "name": name})
+
+
+@app.route("/api/presets/<name>", methods=["GET"])
+def load_preset(name):
+    p = PRESETS / f"{safe_filename(name)}.json"
+    if not p.exists():
+        return ("not found", 404)
+    return jsonify(json.loads(p.read_text()))
+
+
+@app.route("/api/presets/<name>", methods=["DELETE"])
+def delete_preset(name):
+    p = PRESETS / f"{safe_filename(name)}.json"
+    if p.exists():
+        p.unlink()
+    return jsonify({"ok": True})
 
 
 # ---------- main ----------
