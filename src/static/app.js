@@ -1,26 +1,22 @@
 /* Splitup frontend */
 (() => {
 
-  // ---------- constants ----------
   const FRAME_W = 1080, FRAME_H = 1920;
+  const SNAP_PX = 30;        // snap distance in 1080-frame px
+  const SNAP_X = FRAME_W / 2;
+  const SNAP_Y = FRAME_H / 2;
 
   // ---------- state ----------
   const state = {
-    video: null,
-    sceneChanges: [],
-    segments: [],
-    activeIdx: 0,
-    jobId: null,
-    transcribeJobId: null,
-    words: [],
-    transcribed: false,
+    video: null, sceneChanges: [], segments: [], activeIdx: 0,
+    jobId: null, transcribeJobId: null,
+    words: [], transcribed: false,
 
-    // absolute coordinates in the 1080×1920 frame
     text_x: 540, text_y: 200,
     caption_x: 540, caption_y: 1440,
 
     lastWordKey: "",
-    presets: [],  // {name, factory, settings}
+    presets: [],
   };
 
   // ---------- DOM ----------
@@ -34,31 +30,28 @@
   const bgDim = $("bgDim"), shadowBox = $("shadowBox");
   const overlayText = $("overlayText"), captionEl = $("caption");
   const draggingHint = $("draggingHint");
+  const guideX = $("guideX"), guideY = $("guideY");
 
   const baseTitleEl = $("baseTitle");
   const target = $("target"), targetVal = $("targetVal");
   const fgScale = $("fgScale"), fgVal = $("fgVal");
-  const blur = $("blur"), blurVal = $("blurVal");
-  const bgDimRange = $("bgDimRange"), dimVal = $("dimVal");
+  const bgBlur = $("bgBlur"), bgBlurVal = $("bgBlurVal");
+  const shadow = $("shadow"), shadowVal = $("shadowVal");
 
   const showTitle = $("showTitle");
-  const textSize = $("textSize"), textSizeVal = $("textSizeVal");
   const textColor = $("textColor"), textBox = $("textBox");
 
-  const shadowOn = $("shadowOn");
-  const shadowBlur = $("shadowBlur"), shadowBlurVal = $("shadowBlurVal");
-  const shadowOp = $("shadowOp"), shadowOpVal = $("shadowOpVal");
-  const shadowOffX = $("shadowOffX"), shadowOffY = $("shadowOffY");
-
+  // captions
   const capOn = $("capOn"), capModel = $("capModel");
   const transcribeBtn = $("transcribeBtn");
   const capStatus = $("capStatus"), capFill = $("capFill");
-  const capSize = $("capSize"), capSizeVal = $("capSizeVal");
-  const capColor = $("capColor"), capOutlineColor = $("capOutlineColor");
-  const capOutline = $("capOutline");
-  const capWPL = $("capWPL");
-  const capBold = $("capBold"), capUpper = $("capUpper");
-  const capPop = $("capPop");
+  const capColor = $("capColor"), capWPL = $("capWPL");
+  const capBold = $("capBold"), capUpper = $("capUpper"), capPop = $("capPop");
+
+  // advanced
+  const bgDimRange = $("bgDimRange"), dimVal = $("dimVal");
+  const shadowOffX = $("shadowOffX"), shadowOffY = $("shadowOffY");
+  const capOutlineColor = $("capOutlineColor"), capOutline = $("capOutline");
 
   const presetGrid = $("presetGrid");
   const presetName = $("presetName"), presetSaveLocalBtn = $("presetSaveLocalBtn");
@@ -76,6 +69,10 @@
   const progressFill = $("progressFill"), progressText = $("progressText");
   const progressCurrent = $("progressCurrent"), errorsEl = $("errors");
   const loader = $("loader"), loaderText = $("loaderText");
+
+  // text size lives only in JS state (no slider). Captions size also state-only.
+  let titleSize   = 76;
+  let captionSize = 120;
 
   // ---------- helpers ----------
   const fmt = s => {
@@ -101,7 +98,19 @@
     return offsets.join(", ");
   }
 
-  // ---------- drag-and-drop file upload ----------
+  // map ui slider values to engine values
+  function effectiveBgSigma() { return parseFloat(bgBlur.value) * 0.6; }   // 0-60
+  function effectiveShadow() {
+    const s = parseFloat(shadow.value);
+    if (s <= 0) return { enabled: false, blur: 0, opacity: 0 };
+    return {
+      enabled: true,
+      blur: 15 + (s / 100) * 65,           // 15-80
+      opacity: 0.25 + (s / 100) * 0.70,    // 0.25-0.95
+    };
+  }
+
+  // ---------- file upload ----------
   ["dragenter","dragover"].forEach(ev =>
     drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
   ["dragleave","drop"].forEach(ev =>
@@ -132,14 +141,13 @@
     meta.textContent =
       `${state.video.width}×${state.video.height} · ${state.video.fps}fps · ${fmt(state.video.duration)}`;
 
-    fg.addEventListener("play",      () => { bg.play(); playBtn.textContent = "❚❚"; });
-    fg.addEventListener("pause",     () => { bg.pause(); playBtn.textContent = "▶"; });
-    fg.addEventListener("seeked",    () => { bg.currentTime = fg.currentTime; });
+    fg.addEventListener("play",  () => { bg.play(); playBtn.textContent = "❚❚"; });
+    fg.addEventListener("pause", () => { bg.pause(); playBtn.textContent = "▶"; });
+    fg.addEventListener("seeked", () => { bg.currentTime = fg.currentTime; });
     fg.addEventListener("timeupdate", onPlayheadUpdate);
     fg.addEventListener("loadedmetadata", () => {
       scrubber.max = Math.floor(fg.duration * 100);
       transportTime.textContent = `${fmt(0)} / ${fmt(fg.duration)}`;
-      // shadow box should match foreground aspect ratio
       shadowBox.style.aspectRatio = `${state.video.width} / ${state.video.height}`;
     });
 
@@ -148,8 +156,6 @@
     refreshPresetList();
     restoreLastSettings();
     updateOverlayLive();
-
-    // auto-transcribe in the background
     autoTranscribe();
   }
 
@@ -166,11 +172,9 @@
     fg.muted = !fg.muted;
     muteBtn.textContent = fg.muted ? "🔇" : "🔊";
   });
-  scrubber.addEventListener("input", () => {
-    fg.currentTime = parseFloat(scrubber.value) / 100;
-  });
+  scrubber.addEventListener("input", () => { fg.currentTime = parseFloat(scrubber.value) / 100; });
   preview.addEventListener("dblclick", e => {
-    if (e.target.closest(".overlay-text, .caption")) return;
+    if (e.target.closest(".overlay-text, .caption, .resize-handle")) return;
     fg.paused ? fg.play() : fg.pause();
   });
 
@@ -180,110 +184,107 @@
 
     // foreground / background
     fg.style.width = fgScale.value + "%";
-
-    bg.style.filter = `blur(${(parseFloat(blur.value) * 0.6).toFixed(1)}px)`;
+    bg.style.filter = `blur(${(effectiveBgSigma() * 0.5).toFixed(1)}px)`;
     bgDim.style.opacity = (parseFloat(bgDimRange.value) / 100).toFixed(2);
 
-    // drop shadow (CSS preview matches FG aspect ratio)
-    if (shadowOn.checked) {
-      shadowBox.style.opacity = (parseFloat(shadowOp.value) / 100).toFixed(2);
+    // drop shadow
+    const sh = effectiveShadow();
+    if (sh.enabled) {
+      shadowBox.style.opacity = sh.opacity.toFixed(2);
       shadowBox.style.width = fgScale.value + "%";
-      shadowBox.style.filter = `blur(${(parseFloat(shadowBlur.value) * scale).toFixed(1)}px)`;
-      const ox = parseFloat(shadowOffX.value) * scale;
-      const oy = parseFloat(shadowOffY.value) * scale;
+      shadowBox.style.filter = `blur(${(sh.blur * scale).toFixed(1)}px)`;
+      const ox = parseFloat(shadowOffX.value || 0) * scale;
+      const oy = parseFloat(shadowOffY.value || 0) * scale;
       shadowBox.style.transform = `translate(calc(-50% + ${ox.toFixed(1)}px), calc(-50% + ${oy.toFixed(1)}px))`;
     } else {
       shadowBox.style.opacity = 0;
     }
 
-    // title — anchored at (text_x, text_y) where text_y is the TOP of the text
-    const tSize = parseInt(textSize.value, 10);
-    overlayText.style.fontSize = px(tSize);
-    overlayText.style.color = textColor.value;
-    overlayText.style.left = px(state.text_x);
-    overlayText.style.top  = px(state.text_y);
-    overlayText.style.transform = "translateX(-50%)";  // center horizontally on text_x
-    overlayText.style.right = "auto"; overlayText.style.bottom = "auto";
-
+    // title — positioned with text_x/text_y (top-edge anchor)
     const seg = state.segments[state.activeIdx];
     const titleStr = seg?.title || baseTitleEl.value || "Your title";
     overlayText.classList.toggle("hidden-overlay", !showTitle.checked);
-    overlayText.classList.toggle("draggable", true);
-    overlayText.innerHTML = textBox.checked
+    overlayText.style.fontSize = px(titleSize);
+    overlayText.style.color = textColor.value;
+    overlayText.style.left = px(state.text_x);
+    overlayText.style.top  = px(state.text_y);
+    overlayText.style.transform = "translateX(-50%)";
+    const contentEl = overlayText.querySelector(".content");
+    contentEl.innerHTML = textBox.checked
       ? `<span class="pill">${escapeHtml(titleStr)}</span>`
       : escapeHtml(titleStr);
 
     // value labels
-    targetVal.textContent      = `${target.value}s`;
-    fgVal.textContent          = `${fgScale.value}%`;
-    blurVal.textContent        = blur.value;
-    dimVal.textContent         = `${bgDimRange.value}%`;
-    textSizeVal.textContent    = `${textSize.value}px`;
-    shadowBlurVal.textContent  = shadowBlur.value;
-    shadowOpVal.textContent    = `${shadowOp.value}%`;
-    capSizeVal.textContent     = `${capSize.value}px`;
+    targetVal.textContent  = `${target.value}s`;
+    fgVal.textContent      = `${fgScale.value}%`;
+    bgBlurVal.textContent  = `${bgBlur.value}%`;
+    shadowVal.textContent  = `${shadow.value}%`;
+    dimVal.textContent     = `${bgDimRange.value}%`;
 
     updateCaptionLive();
     saveLastSettings();
   }
 
   function updateCaptionLive() {
-    const enabled = capOn.checked && state.words.length > 0;
+    const enabled = capOn.checked;
     captionEl.classList.toggle("hidden-overlay", !enabled);
     if (!enabled) return;
 
     const t = fg.currentTime;
     const wpl = Math.max(1, parseInt(capWPL.value, 10));
     let activeText = "", key = "";
-    if (wpl === 1) {
-      const w = state.words.find(w => t >= w.start && t < w.end);
-      if (w) { activeText = w.word; key = `${w.start.toFixed(2)}_${w.word}`; }
-    } else {
-      for (let i = 0; i < state.words.length; i += wpl) {
-        const grp = state.words.slice(i, i + wpl);
-        if (!grp.length) continue;
-        const s = grp[0].start, e = grp[grp.length - 1].end;
-        if (t >= s && t < e) {
-          activeText = grp.map(g => g.word).join(" ");
-          key = `${s.toFixed(2)}_${activeText}`;
-          break;
+
+    if (state.words.length) {
+      if (wpl === 1) {
+        const w = state.words.find(w => t >= w.start && t < w.end);
+        if (w) { activeText = w.word; key = `${w.start.toFixed(2)}_${w.word}`; }
+      } else {
+        for (let i = 0; i < state.words.length; i += wpl) {
+          const grp = state.words.slice(i, i + wpl);
+          if (!grp.length) continue;
+          const s = grp[0].start, e = grp[grp.length - 1].end;
+          if (t >= s && t < e) {
+            activeText = grp.map(g => g.word).join(" ");
+            key = `${s.toFixed(2)}_${activeText}`;
+            break;
+          }
         }
       }
     }
     if (capUpper.checked) activeText = activeText.toUpperCase();
 
-    // styling
-    const cSize = parseInt(capSize.value, 10);
     captionEl.style.color = capColor.value;
-    captionEl.style.fontSize = px(cSize);
+    captionEl.style.fontSize = px(captionSize);
     captionEl.style.fontWeight = capBold.checked ? "800" : "500";
     captionEl.style.textShadow = buildOutlineShadow(parseInt(capOutline.value, 10), capOutlineColor.value);
     captionEl.style.left = px(state.caption_x);
     captionEl.style.top = px(state.caption_y);
-    captionEl.style.right = "auto"; captionEl.style.bottom = "auto";
     captionEl.style.transform = "translate(-50%, -50%)";
-    captionEl.classList.add("draggable");
 
-    // pop-in: re-render only when active word changes
     if (key !== state.lastWordKey) {
       state.lastWordKey = key;
+      const wordEl = captionEl.querySelector(".word");
       if (activeText) {
-        const wantPop = capPop.checked;
-        captionEl.innerHTML = `<span class="word ${wantPop ? "popping" : ""}">${escapeHtml(activeText)}</span>`;
+        wordEl.className = "word" + (capPop.checked ? " popping" : "");
+        wordEl.textContent = activeText;
+        // restart pop animation
+        if (capPop.checked) { wordEl.style.animation = "none"; void wordEl.offsetWidth; wordEl.style.animation = ""; }
       } else {
-        // placeholder when no current word — keeps the caption box draggable when paused
-        const sample = state.words[0]?.word || "CAPTIONS";
-        captionEl.innerHTML = `<span class="word placeholder">${escapeHtml(capUpper.checked ? sample.toUpperCase() : sample)}</span>`;
+        wordEl.className = "word placeholder";
+        const placeholder = state.words[0]?.word || "CAPTIONS";
+        wordEl.textContent = capUpper.checked ? placeholder.toUpperCase() : placeholder;
       }
     }
   }
 
   // ---------- inputs wiring ----------
-  const liveInputs = [target, fgScale, blur, bgDimRange,
-    showTitle, textSize, textColor, textBox,
-    shadowOn, shadowBlur, shadowOp, shadowOffX, shadowOffY,
-    capOn, capSize, capColor, capOutlineColor, capOutline,
-    capWPL, capBold, capUpper, capPop, capModel];
+  const liveInputs = [
+    target, fgScale, bgBlur, shadow,
+    showTitle, textColor, textBox,
+    capOn, capColor, capWPL, capBold, capUpper, capPop,
+    bgDimRange, shadowOffX, shadowOffY, capOutlineColor, capOutline,
+    capModel,
+  ];
   liveInputs.forEach(el => el.addEventListener("input", updateOverlayLive));
   baseTitleEl.addEventListener("input", () => { refreshSegmentTitles(); updateOverlayLive(); });
 
@@ -295,42 +296,34 @@
     renderSegments();
   }
 
-  // ---------- anchor buttons ----------
-  document.querySelectorAll(".anchor").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const target = btn.dataset.target, pos = btn.dataset.pos;
-      if (target === "title") {
-        const sz = parseInt(textSize.value, 10);
-        if (pos === "top")    state.text_y = 160;
-        if (pos === "center") state.text_y = Math.round((FRAME_H - sz * 1.4) / 2);
-        if (pos === "bottom") state.text_y = FRAME_H - 160 - Math.round(sz * 1.4);
-      } else {
-        if (pos === "top")    state.caption_y = 240;
-        if (pos === "center") state.caption_y = FRAME_H / 2;
-        if (pos === "lower")  state.caption_y = FRAME_H - 480;
-        if (pos === "bottom") state.caption_y = FRAME_H - 240;
-      }
-      updateOverlayLive();
-    });
-  });
-
-  // ---------- drag-to-move overlays ----------
-  function startDrag(el, getPos, setPos, axis = "y") {
-    let startX, startY, origX, origY;
+  // ---------- drag (move) -------------------------------------------------
+  function attachDragMove(el, getPos, setPos) {
     el.addEventListener("mousedown", e => {
-      if (!showTitle.checked && el === overlayText) return;
+      if (e.target.classList.contains("resize-handle")) return;  // resize takes precedence
+      if (el === overlayText && !showTitle.checked) return;
+      if (el === captionEl && !capOn.checked) return;
       e.preventDefault();
       const scale = previewScale();
       const orig = getPos();
-      origX = orig.x; origY = orig.y;
-      startX = e.clientX; startY = e.clientY;
+      const startX = e.clientX, startY = e.clientY;
       el.classList.add("dragging");
 
       function onMove(ev) {
-        const dx = (ev.clientX - startX) / scale;
-        const dy = (ev.clientY - startY) / scale;
-        const nx = clamp(origX + dx, 50, FRAME_W - 50);
-        const ny = clamp(origY + dy, 0, FRAME_H);
+        let dx = (ev.clientX - startX) / scale;
+        let dy = (ev.clientY - startY) / scale;
+        let nx = clamp(orig.x + dx, 50, FRAME_W - 50);
+        let ny = clamp(orig.y + dy, 0, FRAME_H);
+
+        // snap to centers
+        const snappedX = Math.abs(nx - SNAP_X) < SNAP_PX;
+        const snappedY = Math.abs(ny - SNAP_Y) < SNAP_PX;
+        if (snappedX) nx = SNAP_X;
+        if (snappedY) ny = SNAP_Y;
+
+        guideX.classList.toggle("show", snappedX);
+        guideY.classList.toggle("show", snappedY);
+        if (snappedY) guideY.style.top = px(SNAP_Y);
+
         setPos(nx, ny);
         draggingHint.textContent = `x ${nx | 0}  ·  y ${ny | 0}`;
         draggingHint.classList.add("show");
@@ -341,22 +334,56 @@
         document.removeEventListener("mouseup", onUp);
         el.classList.remove("dragging");
         draggingHint.classList.remove("show");
+        guideX.classList.remove("show");
+        guideY.classList.remove("show");
       }
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
     });
   }
 
-  startDrag(
-    overlayText,
+  attachDragMove(overlayText,
     () => ({ x: state.text_x, y: state.text_y }),
-    (x, y) => { state.text_x = x; state.text_y = y; },
-  );
-  startDrag(
-    captionEl,
+    (x, y) => { state.text_x = x; state.text_y = y; });
+
+  attachDragMove(captionEl,
     () => ({ x: state.caption_x, y: state.caption_y }),
-    (x, y) => { state.caption_x = x; state.caption_y = y; },
-  );
+    (x, y) => { state.caption_x = x; state.caption_y = y; });
+
+  // ---------- corner resize -------------------------------------------------
+  function attachResize(el, getSize, setSize, minSize, maxSize) {
+    const handle = el.querySelector(".resize-handle");
+    handle.addEventListener("mousedown", e => {
+      e.preventDefault(); e.stopPropagation();
+      handle.classList.add("active");
+      const scale = previewScale();
+      const rect = el.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const startDist = Math.hypot(e.clientX - cx, e.clientY - cy);
+      const startSize = getSize();
+
+      function onMove(ev) {
+        const dist = Math.hypot(ev.clientX - cx, ev.clientY - cy);
+        const ratio = dist / Math.max(1, startDist);
+        const newSize = clamp(Math.round(startSize * ratio), minSize, maxSize);
+        setSize(newSize);
+        draggingHint.textContent = `size ${newSize}px`;
+        draggingHint.classList.add("show");
+        updateOverlayLive();
+      }
+      function onUp() {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        handle.classList.remove("active");
+        draggingHint.classList.remove("show");
+      }
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  }
+  attachResize(overlayText, () => titleSize,   v => { titleSize = v; },   24, 200);
+  attachResize(captionEl,   () => captionSize, v => { captionSize = v; }, 32, 240);
 
   // ---------- segment seek ----------
   seekStart.addEventListener("click", () => { const s = state.segments[state.activeIdx]; if (s) fg.currentTime = s.start; });
@@ -387,7 +414,7 @@
 
   transcribeBtn.addEventListener("click", async () => {
     if (!state.video) return;
-    if (!confirm("Re-transcribe with " + capModel.value + "? This deletes the cached transcript.")) return;
+    if (!confirm(`Re-transcribe with ${capModel.value}? This deletes the cached transcript.`)) return;
     await fetch(`/api/words/${state.video.id}`, { method: "DELETE" });
     state.words = [];
     autoTranscribe();
@@ -427,8 +454,7 @@
         method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({ id: state.video.id, threshold: 0.35 }),
       });
-      const data = await r.json();
-      state.sceneChanges = data.scene_changes || [];
+      state.sceneChanges = (await r.json()).scene_changes || [];
       await buildSegments();
     } catch (err) { alert("Analyze failed: " + err.message); }
     finally { hideLoader(); }
@@ -496,32 +522,33 @@
 
   // ---------- settings serialize ----------
   function getSettings() {
+    const sh = effectiveShadow();
     return {
       target: parseInt(target.value, 10),
       base_title: baseTitleEl.value || "Clip",
       fg_scale: parseInt(fgScale.value, 10) / 100,
-      blur: parseFloat(blur.value),
-      bg_dim: parseFloat(bgDimRange.value) / 100,
+      blur: effectiveBgSigma(),
+      bg_dim: parseFloat(bgDimRange.value || 0) / 100,
       show_title: showTitle.checked,
-      text_size: parseInt(textSize.value, 10),
+      text_size: titleSize,
       text_color: textColor.value,
       text_x: state.text_x, text_y: state.text_y,
       text_box: textBox.checked,
       shadow: {
-        enabled: shadowOn.checked,
-        blur: parseFloat(shadowBlur.value),
-        opacity: parseFloat(shadowOp.value) / 100,
-        offset_x: parseInt(shadowOffX.value, 10),
-        offset_y: parseInt(shadowOffY.value, 10),
+        enabled: sh.enabled,
+        blur: sh.blur,
+        opacity: sh.opacity,
+        offset_x: parseInt(shadowOffX.value || 0, 10),
+        offset_y: parseInt(shadowOffY.value || 0, 10),
       },
       captions: {
         enabled: capOn.checked,
         model: capModel.value,
         font: "Inter",
-        size: parseInt(capSize.value, 10),
+        size: captionSize,
         color: capColor.value,
         outline_color: capOutlineColor.value,
-        outline: parseInt(capOutline.value, 10),
+        outline: parseInt(capOutline.value || 0, 10),
         shadow: 2,
         caption_x: state.caption_x,
         caption_y: state.caption_y,
@@ -531,6 +558,9 @@
         uppercase: capUpper.checked,
         pop_in: capPop.checked,
       },
+      // remember the slider positions (canonical settings carry the engine values)
+      _ui_shadow:   parseFloat(shadow.value),
+      _ui_bgBlur:   parseFloat(bgBlur.value),
     };
   }
 
@@ -539,35 +569,38 @@
     if (s.target != null) target.value = s.target;
     if (s.base_title) baseTitleEl.value = s.base_title;
     if (s.fg_scale != null) fgScale.value = Math.round(s.fg_scale * 100);
-    if (s.blur != null) blur.value = s.blur;
-    if (s.bg_dim != null) bgDimRange.value = Math.round(s.bg_dim * 100);
     if (s.show_title != null) showTitle.checked = !!s.show_title;
-    if (s.text_size != null) textSize.value = s.text_size;
+    if (s.text_size != null) titleSize = s.text_size;
     if (s.text_color) textColor.value = s.text_color;
     if (s.text_box != null) textBox.checked = !!s.text_box;
+    if (s.bg_dim != null) bgDimRange.value = Math.round(s.bg_dim * 100);
 
-    // migrate old text_pos+offset → text_y if needed
     if (s.text_y != null) state.text_y = s.text_y;
     else if (s.text_pos) {
-      const sz = s.text_size || 76;
-      const off = s.text_offset || 180;
+      const sz = s.text_size || 76, off = s.text_offset || 180;
       if (s.text_pos === "top") state.text_y = off;
       else if (s.text_pos === "bottom") state.text_y = FRAME_H - off - Math.round(sz * 1.4);
       else state.text_y = (FRAME_H - Math.round(sz * 1.4)) / 2;
     }
     state.text_x = s.text_x != null ? s.text_x : 540;
 
-    const sh = s.shadow || {};
-    if (sh.enabled != null) shadowOn.checked = !!sh.enabled;
-    if (sh.blur != null) shadowBlur.value = sh.blur;
-    if (sh.opacity != null) shadowOp.value = Math.round(sh.opacity * 100);
-    if (sh.offset_x != null) shadowOffX.value = sh.offset_x;
-    if (sh.offset_y != null) shadowOffY.value = sh.offset_y;
+    // background blur slider — derive from sigma
+    if (s._ui_bgBlur != null)       bgBlur.value = s._ui_bgBlur;
+    else if (s.blur != null)        bgBlur.value = clamp(Math.round(s.blur / 0.6), 0, 100);
+
+    // shadow strength slider — derive from opacity if no explicit ui value
+    if (s._ui_shadow != null)              shadow.value = s._ui_shadow;
+    else if (s.shadow) {
+      if (!s.shadow.enabled)               shadow.value = 0;
+      else if (s.shadow.opacity != null)   shadow.value = clamp(Math.round((s.shadow.opacity - 0.25) / 0.7 * 100), 1, 100);
+    }
+    if (s.shadow?.offset_x != null) shadowOffX.value = s.shadow.offset_x;
+    if (s.shadow?.offset_y != null) shadowOffY.value = s.shadow.offset_y;
 
     const c = s.captions || {};
     if (c.enabled != null) capOn.checked = !!c.enabled;
     if (c.model) capModel.value = c.model;
-    if (c.size != null) capSize.value = c.size;
+    if (c.size != null) captionSize = c.size;
     if (c.color) capColor.value = c.color;
     if (c.outline_color) capOutlineColor.value = c.outline_color;
     if (c.outline != null) capOutline.value = c.outline;
@@ -592,8 +625,7 @@
   async function refreshPresetList() {
     try {
       const r = await fetch("/api/presets");
-      const d = await r.json();
-      state.presets = d.presets || [];
+      state.presets = (await r.json()).presets || [];
       renderPresetCards();
     } catch {}
   }
@@ -603,11 +635,11 @@
     state.presets.forEach(p => {
       const card = document.createElement("button");
       card.type = "button";
-      card.className = "preset-card" + (p.factory ? "" : " user");
+      card.className = "preset-card";
       card.innerHTML = `
         <div class="preset-name">${escapeHtml(p.name)}</div>
         <div class="preset-tag">${p.factory ? "factory" : "user"}</div>
-        ${p.factory ? "" : `<button class="preset-del" data-name="${escapeHtml(p.name)}" title="delete">✕</button>`}
+        ${p.factory ? "" : `<button class="preset-del" data-name="${escapeHtml(p.name)}">✕</button>`}
       `;
       card.addEventListener("click", e => {
         if (e.target.classList.contains("preset-del")) return;
@@ -657,10 +689,7 @@
     try { localStorage.setItem("splitup.last", JSON.stringify(getSettings())); } catch {}
   }
   function restoreLastSettings() {
-    try {
-      const s = localStorage.getItem("splitup.last");
-      if (s) applySettings(JSON.parse(s));
-    } catch {}
+    try { const s = localStorage.getItem("splitup.last"); if (s) applySettings(JSON.parse(s)); } catch {}
   }
 
   // ---------- render ----------
@@ -709,7 +738,6 @@
     });
   });
 
-  // initial render
   refreshPresetList();
   updateOverlayLive();
 })();

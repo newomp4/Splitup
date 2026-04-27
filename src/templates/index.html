@@ -22,14 +22,14 @@
           Choose file
           <input type="file" id="file" accept="video/*" hidden />
         </label>
-        <div class="drop-hint">Any length · transcription starts automatically once it's loaded.</div>
+        <div class="drop-hint">Captions transcribe automatically once it's loaded.</div>
       </div>
     </section>
 
     <!-- Step 2: editor -->
     <section id="editor" class="editor hidden">
 
-      <!-- left: preview + transport -->
+      <!-- LEFT: preview -->
       <div class="left">
         <div class="preview-wrap">
           <div class="preview" id="preview">
@@ -37,12 +37,22 @@
             <div class="bg-dim" id="bgDim"></div>
             <div class="shadow-box" id="shadowBox"></div>
             <video id="fg" playsinline preload="auto"></video>
-            <div class="overlay-text" id="overlayText" data-handle="title"></div>
-            <div class="caption" id="caption" data-handle="caption"></div>
+
+            <div class="overlay-text" id="overlayText" data-handle="title">
+              <span class="content"></span>
+              <div class="resize-handle"></div>
+            </div>
+
+            <div class="caption" id="caption" data-handle="caption">
+              <span class="word"></span>
+              <div class="resize-handle"></div>
+            </div>
+
+            <div class="guide guide-x" id="guideX"></div>
+            <div class="guide guide-y" id="guideY"></div>
             <div class="dragging-hint" id="draggingHint"></div>
           </div>
 
-          <!-- custom transport: play, scrubber, time -->
           <div class="transport">
             <button class="transport-btn" id="playBtn" title="play / pause">▶</button>
             <input type="range" id="scrubber" min="0" max="1000" step="1" value="0" />
@@ -51,231 +61,126 @@
           </div>
 
           <div class="seg-jump">
-            <button class="btn small" id="seekStart">⏮ start</button>
-            <button class="btn small" id="seekEnd">end ⏭</button>
+            <button class="btn small" id="seekStart">⏮</button>
+            <button class="btn small" id="seekEnd">⏭</button>
             <span class="muted seg-label" id="segLabel">no segment selected</span>
           </div>
         </div>
       </div>
 
-      <!-- right: control panels -->
+      <!-- RIGHT: condensed sidebar -->
       <div class="right">
 
-        <!-- LAYOUT --------------------------------------------------- -->
-        <details class="panel" open>
-          <summary>Layout</summary>
-
-          <div class="group">
-            <label class="lbl">Title (base) <span class="val muted">used for filenames</span></label>
-            <input type="text" id="baseTitle" value="My Clip" />
-          </div>
-
-          <div class="group">
-            <label class="lbl">Clip length <span class="val" id="targetVal">60s</span></label>
-            <input type="range" id="target" min="15" max="180" step="5" value="60" />
-          </div>
-
-          <div class="group">
-            <label class="lbl">Foreground scale <span class="val" id="fgVal">95%</span></label>
-            <input type="range" id="fgScale" min="40" max="200" step="1" value="95" />
-            <div class="hint muted">Above 100 % the foreground crops past the canvas edges.</div>
-          </div>
-
-          <div class="group">
-            <label class="lbl">Background blur <span class="val" id="blurVal">25</span></label>
-            <input type="range" id="blur" min="0" max="60" step="1" value="25" />
-          </div>
-
-          <div class="group">
-            <label class="lbl">Background dim <span class="val" id="dimVal">0%</span></label>
-            <input type="range" id="bgDimRange" min="0" max="80" step="1" value="0" />
-          </div>
-        </details>
-
-        <!-- TITLE TEXT --------------------------------------------- -->
-        <details class="panel" open>
-          <summary>Title</summary>
-
-          <div class="group">
-            <label class="check">
-              <input type="checkbox" id="showTitle" checked />
-              <span>Show title on each clip</span>
-            </label>
-          </div>
-
-          <div class="group">
-            <label class="lbl">Size <span class="val" id="textSizeVal">76px</span></label>
-            <input type="range" id="textSize" min="32" max="180" step="2" value="76" />
-          </div>
-
-          <div class="group row two">
-            <div class="col">
-              <label class="lbl">Color</label>
-              <input type="color" id="textColor" value="#ffffff" />
-            </div>
-            <div class="col">
-              <label class="lbl">Background box</label>
-              <label class="check"><input type="checkbox" id="textBox" checked /><span>Translucent</span></label>
-            </div>
-          </div>
-
-          <div class="group">
-            <label class="lbl">Snap position</label>
-            <div class="anchor-row">
-              <button class="anchor" data-target="title" data-pos="top">↑ top</button>
-              <button class="anchor" data-target="title" data-pos="center">⊙ center</button>
-              <button class="anchor" data-target="title" data-pos="bottom">↓ bottom</button>
-            </div>
-            <div class="hint muted">Or just drag the title in the preview.</div>
-          </div>
-        </details>
-
-        <!-- DROP SHADOW -------------------------------------------- -->
-        <details class="panel">
-          <summary>Drop shadow</summary>
-
-          <div class="group">
-            <label class="check">
-              <input type="checkbox" id="shadowOn" checked />
-              <span>Drop shadow under foreground</span>
-            </label>
-          </div>
-
-          <div class="group">
-            <label class="lbl">Blur <span class="val" id="shadowBlurVal">55</span></label>
-            <input type="range" id="shadowBlur" min="2" max="100" step="1" value="55" />
-          </div>
-
-          <div class="group">
-            <label class="lbl">Opacity <span class="val" id="shadowOpVal">85%</span></label>
-            <input type="range" id="shadowOp" min="0" max="100" step="1" value="85" />
-          </div>
-
-          <div class="group row">
-            <div class="col">
-              <label class="lbl">Offset X</label>
-              <input type="number" id="shadowOffX" value="0" min="-200" max="200" step="2" />
-            </div>
-            <div class="col">
-              <label class="lbl">Offset Y</label>
-              <input type="number" id="shadowOffY" value="18" min="-200" max="200" step="2" />
-            </div>
-            <div class="col">&nbsp;</div>
-          </div>
-        </details>
-
-        <!-- CAPTIONS ----------------------------------------------- -->
-        <details class="panel" open>
-          <summary>Captions</summary>
-
-          <div class="cap-status" id="capStatusBar">
-            <div class="cap-status-label" id="capStatus">Waiting…</div>
-            <div class="progress-bar small"><div class="progress-fill" id="capFill"></div></div>
-          </div>
-
-          <div class="group">
-            <label class="check">
-              <input type="checkbox" id="capOn" checked />
-              <span>Burn word-by-word captions</span>
-            </label>
-          </div>
-
-          <div class="group row two">
-            <div class="col">
-              <label class="lbl">Whisper model</label>
-              <select id="capModel">
-                <option value="tiny.en">tiny.en (fast, ~75 MB)</option>
-                <option value="base.en" selected>base.en (good, ~150 MB)</option>
-                <option value="small.en">small.en (better, ~485 MB)</option>
-                <option value="medium.en">medium.en (best EN, ~1.5 GB)</option>
-              </select>
-            </div>
-            <div class="col">
-              <label class="lbl">&nbsp;</label>
-              <button class="btn small" id="transcribeBtn" type="button">Re-transcribe</button>
-            </div>
-          </div>
-
-          <div class="group">
-            <label class="lbl">Size <span class="val" id="capSizeVal">120px</span></label>
-            <input type="range" id="capSize" min="40" max="220" step="2" value="120" />
-          </div>
-
-          <div class="group row">
-            <div class="col">
-              <label class="lbl">Color</label>
-              <input type="color" id="capColor" value="#ffffff" />
-            </div>
-            <div class="col">
-              <label class="lbl">Outline</label>
-              <input type="color" id="capOutlineColor" value="#000000" />
-            </div>
-            <div class="col">
-              <label class="lbl">Outline w</label>
-              <input type="number" id="capOutline" value="6" min="0" max="20" step="1" />
-            </div>
-          </div>
-
-          <div class="group row">
-            <div class="col">
-              <label class="lbl">Words/line</label>
-              <input type="number" id="capWPL" value="1" min="1" max="6" step="1" />
-            </div>
-            <div class="col">
-              <label class="check"><input type="checkbox" id="capBold" checked /><span>Bold</span></label>
-            </div>
-            <div class="col">
-              <label class="check"><input type="checkbox" id="capUpper" checked /><span>UPPERCASE</span></label>
-            </div>
-          </div>
-
-          <div class="group">
-            <label class="check"><input type="checkbox" id="capPop" checked /><span>Pop-in animation per word</span></label>
-          </div>
-
-          <div class="group">
-            <label class="lbl">Snap position</label>
-            <div class="anchor-row">
-              <button class="anchor" data-target="caption" data-pos="top">↑ top</button>
-              <button class="anchor" data-target="caption" data-pos="center">⊙ center</button>
-              <button class="anchor" data-target="caption" data-pos="lower">↓ lower-third</button>
-              <button class="anchor" data-target="caption" data-pos="bottom">⏷ bottom</button>
-            </div>
-            <div class="hint muted">Or drag the active word in the preview.</div>
-          </div>
-        </details>
-
-        <!-- PRESETS ------------------------------------------------ -->
-        <details class="panel" open>
-          <summary>Presets</summary>
-
+        <!-- Presets ------------------------------------------------ -->
+        <div class="section">
+          <div class="section-head">Presets</div>
           <div class="preset-grid" id="presetGrid"></div>
-
-          <div class="divider"></div>
-
-          <div class="group row two">
-            <div class="col">
-              <label class="lbl">Save current as</label>
-              <input type="text" id="presetName" placeholder="my_preset" />
-            </div>
-            <div class="col">
-              <label class="lbl">&nbsp;</label>
-              <button class="btn small" id="presetSaveLocalBtn" type="button">Save</button>
-            </div>
+          <div class="preset-actions">
+            <input type="text" id="presetName" placeholder="save current as…" />
+            <button class="btn small" id="presetSaveLocalBtn" type="button">Save</button>
           </div>
-
-          <div class="actions">
-            <button class="btn small" id="presetExportBtn" type="button">Export JSON…</button>
-            <label class="btn small" style="cursor:pointer;">
-              Import JSON…
+          <div class="preset-actions">
+            <button class="btn small ghost" id="presetExportBtn" type="button">Export JSON</button>
+            <label class="btn small ghost" style="cursor:pointer; flex:1; text-align:center;">
+              Import JSON
               <input type="file" id="presetImportFile" accept="application/json,.json" hidden />
             </label>
           </div>
+        </div>
+
+        <!-- Quick settings ----------------------------------------- -->
+        <div class="section">
+          <div class="row">
+            <label class="lbl">Clip length <span class="val" id="targetVal">60s</span></label>
+            <input type="range" id="target" min="15" max="180" step="5" value="60" />
+          </div>
+          <div class="row">
+            <label class="lbl">Foreground scale <span class="val" id="fgVal">95%</span></label>
+            <input type="range" id="fgScale" min="40" max="200" step="1" value="95" />
+          </div>
+          <div class="row">
+            <label class="lbl">Background blur <span class="val" id="bgBlurVal">40%</span></label>
+            <input type="range" id="bgBlur" min="0" max="100" step="1" value="40" />
+          </div>
+          <div class="row">
+            <label class="lbl">Drop shadow <span class="val" id="shadowVal">75%</span></label>
+            <input type="range" id="shadow" min="0" max="100" step="1" value="75" />
+          </div>
+        </div>
+
+        <!-- Title -------------------------------------------------- -->
+        <div class="section">
+          <div class="section-head">Title</div>
+          <div class="row inline">
+            <input type="text" id="baseTitle" value="My Clip" placeholder="title text" />
+            <input type="color" id="textColor" value="#ffffff" title="text color" />
+            <label class="check"><input type="checkbox" id="showTitle" checked /><span>show</span></label>
+          </div>
+          <label class="check"><input type="checkbox" id="textBox" checked /><span>Translucent box behind text</span></label>
+          <div class="hint muted">Drag in the preview to position. Drag the corner dot to resize.</div>
+        </div>
+
+        <!-- Captions ----------------------------------------------- -->
+        <div class="section">
+          <div class="section-head">Captions</div>
+
+          <div class="cap-status" id="capStatusBar">
+            <div class="cap-status-label" id="capStatus">waiting for upload</div>
+            <div class="progress-bar small"><div class="progress-fill" id="capFill"></div></div>
+          </div>
+
+          <label class="check"><input type="checkbox" id="capOn" checked /><span>Burn captions</span></label>
+
+          <div class="row">
+            <label class="lbl">Whisper model</label>
+            <select id="capModel">
+              <option value="tiny.en">Tiny — instant, basic accuracy (75 MB)</option>
+              <option value="base.en" selected>Base — fast, recommended (150 MB)</option>
+              <option value="small.en">Small — better with accents (485 MB)</option>
+              <option value="medium.en">Medium — pro quality, slower (1.5 GB)</option>
+            </select>
+            <div class="hint muted">Bigger model = more accurate but slower &amp; bigger download. Run once per video — cached after.</div>
+          </div>
+
+          <div class="row inline">
+            <input type="color" id="capColor" value="#ffffff" title="caption color" />
+            <label class="check small-check">
+              <span>Words/line</span>
+              <input type="number" id="capWPL" value="1" min="1" max="6" step="1" />
+            </label>
+          </div>
+
+          <div class="toggles">
+            <label class="check"><input type="checkbox" id="capUpper" checked /><span>UPPER</span></label>
+            <label class="check"><input type="checkbox" id="capBold" checked /><span>Bold</span></label>
+            <label class="check"><input type="checkbox" id="capPop" checked /><span>Pop-in</span></label>
+          </div>
+
+          <button class="btn small ghost" id="transcribeBtn" type="button" style="width:100%; margin-top:8px;">Re-transcribe with selected model</button>
+        </div>
+
+        <!-- Advanced ----------------------------------------------- -->
+        <details class="section advanced">
+          <summary>Advanced</summary>
+          <div class="row">
+            <label class="lbl">Background dim <span class="val" id="dimVal">0%</span></label>
+            <input type="range" id="bgDimRange" min="0" max="80" step="1" value="0" />
+          </div>
+          <div class="row inline">
+            <label class="lbl" style="flex:1">Shadow X</label>
+            <input type="number" id="shadowOffX" value="0" min="-200" max="200" step="2" style="width:80px;" />
+            <label class="lbl" style="flex:1">Y</label>
+            <input type="number" id="shadowOffY" value="18" min="-200" max="200" step="2" style="width:80px;" />
+          </div>
+          <div class="row inline">
+            <label class="lbl" style="flex:1">Outline color</label>
+            <input type="color" id="capOutlineColor" value="#000000" />
+            <label class="lbl" style="flex:1">Width</label>
+            <input type="number" id="capOutline" value="6" min="0" max="20" step="1" style="width:80px;" />
+          </div>
         </details>
 
-        <div class="primary-bar">
-          <button class="btn primary big" id="detectBtn">Detect scenes &amp; build segments</button>
-        </div>
+        <button class="btn primary big" id="detectBtn">Detect scenes &amp; build segments</button>
       </div>
     </section>
 
