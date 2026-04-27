@@ -11,3 +11,4 @@ temp/
 
 # OS
 .DS_Store
+.claude/

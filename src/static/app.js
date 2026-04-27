@@ -1,6 +1,9 @@
 /* Splitup frontend */
 (() => {
 
+  // ---------- constants ----------
+  const FRAME_W = 1080, FRAME_H = 1920;
+
   // ---------- state ----------
   const state = {
     video: null,
@@ -9,23 +12,28 @@
     activeIdx: 0,
     jobId: null,
     transcribeJobId: null,
-    words: [],          // [{word, start, end}]
+    words: [],
     transcribed: false,
+
+    // absolute coordinates in the 1080×1920 frame
+    text_x: 540, text_y: 200,
+    caption_x: 540, caption_y: 1440,
+
+    lastWordKey: "",
+    presets: [],  // {name, factory, settings}
   };
 
   // ---------- DOM ----------
-  const $ = (id) => document.getElementById(id);
-
+  const $ = id => document.getElementById(id);
   const drop = $("drop"), fileInput = $("file");
   const editor = $("editor"), segmentsSec = $("segments"), progressSec = $("progress");
   const meta = $("meta");
 
   const preview = $("preview");
   const bg = $("bg"), fg = $("fg");
-  const bgDim = $("bgDim");
-  const shadowBox = $("shadowBox");
-  const overlayText = $("overlayText");
-  const captionEl = $("caption");
+  const bgDim = $("bgDim"), shadowBox = $("shadowBox");
+  const overlayText = $("overlayText"), captionEl = $("caption");
+  const draggingHint = $("draggingHint");
 
   const baseTitleEl = $("baseTitle");
   const target = $("target"), targetVal = $("targetVal");
@@ -35,38 +43,29 @@
 
   const showTitle = $("showTitle");
   const textSize = $("textSize"), textSizeVal = $("textSizeVal");
-  const textColor = $("textColor");
-  const textPos = $("textPos");
-  const textOffset = $("textOffset");
-  const textBox = $("textBox");
+  const textColor = $("textColor"), textBox = $("textBox");
 
   const shadowOn = $("shadowOn");
   const shadowBlur = $("shadowBlur"), shadowBlurVal = $("shadowBlurVal");
   const shadowOp = $("shadowOp"), shadowOpVal = $("shadowOpVal");
   const shadowOffX = $("shadowOffX"), shadowOffY = $("shadowOffY");
 
-  const capOn = $("capOn");
-  const capModel = $("capModel");
+  const capOn = $("capOn"), capModel = $("capModel");
   const transcribeBtn = $("transcribeBtn");
   const capStatus = $("capStatus"), capFill = $("capFill");
   const capSize = $("capSize"), capSizeVal = $("capSizeVal");
-  const capColor = $("capColor");
-  const capOutlineColor = $("capOutlineColor");
+  const capColor = $("capColor"), capOutlineColor = $("capOutlineColor");
   const capOutline = $("capOutline");
-  const capShadow = $("capShadow");
-  const capPos = $("capPos");
-  const capMarginV = $("capMarginV");
   const capWPL = $("capWPL");
-  const capBold = $("capBold");
-  const capUpper = $("capUpper");
+  const capBold = $("capBold"), capUpper = $("capUpper");
+  const capPop = $("capPop");
 
-  const presetName = $("presetName");
-  const presetList = $("presetList");
-  const presetSaveLocalBtn = $("presetSaveLocalBtn");
-  const presetLoadBtn = $("presetLoadBtn");
-  const presetDeleteBtn = $("presetDeleteBtn");
-  const presetExportBtn = $("presetExportBtn");
-  const presetImportFile = $("presetImportFile");
+  const presetGrid = $("presetGrid");
+  const presetName = $("presetName"), presetSaveLocalBtn = $("presetSaveLocalBtn");
+  const presetExportBtn = $("presetExportBtn"), presetImportFile = $("presetImportFile");
+
+  const playBtn = $("playBtn"), scrubber = $("scrubber");
+  const transportTime = $("transportTime"), muteBtn = $("muteBtn");
 
   const detectBtn = $("detectBtn"), rebuildBtn = $("rebuildBtn"), renderBtn = $("renderBtn");
   const revealBtn = $("revealBtn");
@@ -79,40 +78,36 @@
   const loader = $("loader"), loaderText = $("loaderText");
 
   // ---------- helpers ----------
-  const fmt = (s) => {
+  const fmt = s => {
     s = Math.max(0, s | 0);
     const h = (s / 3600) | 0, m = ((s % 3600) / 60) | 0, sec = s % 60;
     return h ? `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`
              : `${m}:${String(sec).padStart(2,"0")}`;
   };
-  const showLoader = (msg = "working") => { loaderText.textContent = msg; loader.classList.remove("hidden"); };
+  const showLoader = msg => { loaderText.textContent = msg || "working"; loader.classList.remove("hidden"); };
   const hideLoader = () => loader.classList.add("hidden");
-  const escapeHtml = (s) => { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; };
+  const escapeHtml = s => { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-  // ratio between preview pixels and the 1080×1920 render canvas
-  function previewScale() { return preview.getBoundingClientRect().width / 1080; }
-  function px(targetPx) { return (targetPx * previewScale()).toFixed(1) + "px"; }
+  function previewScale() { return preview.getBoundingClientRect().width / FRAME_W; }
+  function px(framePx) { return (framePx * previewScale()).toFixed(1) + "px"; }
+
   function buildOutlineShadow(width, color) {
     if (width <= 0) return "none";
     const w = width * previewScale();
     const offsets = [];
-    for (let dx = -w; dx <= w; dx += w) for (let dy = -w; dy <= w; dy += w) if (dx || dy) offsets.push(`${dx.toFixed(1)}px ${dy.toFixed(1)}px 0 ${color}`);
+    for (let dx = -w; dx <= w; dx += w) for (let dy = -w; dy <= w; dy += w)
+      if (dx || dy) offsets.push(`${dx.toFixed(1)}px ${dy.toFixed(1)}px 0 ${color}`);
     return offsets.join(", ");
   }
 
-  // ---------- drag & drop ----------
+  // ---------- drag-and-drop file upload ----------
   ["dragenter","dragover"].forEach(ev =>
-    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); })
-  );
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
   ["dragleave","drop"].forEach(ev =>
-    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); })
-  );
-  drop.addEventListener("drop", e => {
-    if (e.dataTransfer.files?.length) handleFile(e.dataTransfer.files[0]);
-  });
-  fileInput.addEventListener("change", e => {
-    if (e.target.files?.length) handleFile(e.target.files[0]);
-  });
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); }));
+  drop.addEventListener("drop", e => { if (e.dataTransfer.files?.length) handleFile(e.dataTransfer.files[0]); });
+  fileInput.addEventListener("change", e => { if (e.target.files?.length) handleFile(e.target.files[0]); });
 
   async function handleFile(file) {
     showLoader("uploading");
@@ -120,8 +115,7 @@
     try {
       const r = await fetch("/api/upload", { method: "POST", body: fd });
       if (!r.ok) throw new Error(await r.text());
-      const data = await r.json();
-      state.video = data;
+      state.video = await r.json();
       onVideoLoaded();
     } catch (err) {
       alert("Upload failed: " + err.message);
@@ -133,104 +127,125 @@
     editor.classList.remove("hidden");
 
     const url = `/api/source/${state.video.id}`;
-    bg.src = url; fg.src = url; bg.muted = true;
+    bg.src = url; fg.src = url; bg.muted = true; fg.muted = false;
 
     meta.textContent =
       `${state.video.width}×${state.video.height} · ${state.video.fps}fps · ${fmt(state.video.duration)}`;
 
-    fg.addEventListener("play",   () => bg.play());
-    fg.addEventListener("pause",  () => bg.pause());
-    fg.addEventListener("seeked", () => { bg.currentTime = fg.currentTime; });
-    fg.addEventListener("timeupdate", () => {
-      if (Math.abs(bg.currentTime - fg.currentTime) > 0.25) bg.currentTime = fg.currentTime;
-      updateCaptionLive();
+    fg.addEventListener("play",      () => { bg.play(); playBtn.textContent = "❚❚"; });
+    fg.addEventListener("pause",     () => { bg.pause(); playBtn.textContent = "▶"; });
+    fg.addEventListener("seeked",    () => { bg.currentTime = fg.currentTime; });
+    fg.addEventListener("timeupdate", onPlayheadUpdate);
+    fg.addEventListener("loadedmetadata", () => {
+      scrubber.max = Math.floor(fg.duration * 100);
+      transportTime.textContent = `${fmt(0)} / ${fmt(fg.duration)}`;
+      // shadow box should match foreground aspect ratio
+      shadowBox.style.aspectRatio = `${state.video.width} / ${state.video.height}`;
     });
 
-    // resize observer to keep px scaling correct
-    new ResizeObserver(() => updateOverlayLive()).observe(preview);
+    new ResizeObserver(updateOverlayLive).observe(preview);
 
     refreshPresetList();
     restoreLastSettings();
     updateOverlayLive();
+
+    // auto-transcribe in the background
+    autoTranscribe();
   }
+
+  function onPlayheadUpdate() {
+    if (Math.abs(bg.currentTime - fg.currentTime) > 0.25) bg.currentTime = fg.currentTime;
+    if (!scrubber.matches(":active")) scrubber.value = Math.floor(fg.currentTime * 100);
+    transportTime.textContent = `${fmt(fg.currentTime)} / ${fmt(fg.duration || 0)}`;
+    updateCaptionLive();
+  }
+
+  // ---------- transport ----------
+  playBtn.addEventListener("click", () => fg.paused ? fg.play() : fg.pause());
+  muteBtn.addEventListener("click", () => {
+    fg.muted = !fg.muted;
+    muteBtn.textContent = fg.muted ? "🔇" : "🔊";
+  });
+  scrubber.addEventListener("input", () => {
+    fg.currentTime = parseFloat(scrubber.value) / 100;
+  });
+  preview.addEventListener("dblclick", e => {
+    if (e.target.closest(".overlay-text, .caption")) return;
+    fg.paused ? fg.play() : fg.pause();
+  });
 
   // ---------- live preview ----------
   function updateOverlayLive() {
+    const scale = previewScale();
+
     // foreground / background
     fg.style.width = fgScale.value + "%";
 
-    const pxBlur = (parseFloat(blur.value) * 0.6).toFixed(1) + "px";
-    bg.style.filter = `blur(${pxBlur})`;
+    bg.style.filter = `blur(${(parseFloat(blur.value) * 0.6).toFixed(1)}px)`;
     bgDim.style.opacity = (parseFloat(bgDimRange.value) / 100).toFixed(2);
 
-    // drop shadow
+    // drop shadow (CSS preview matches FG aspect ratio)
     if (shadowOn.checked) {
       shadowBox.style.opacity = (parseFloat(shadowOp.value) / 100).toFixed(2);
       shadowBox.style.width = fgScale.value + "%";
-      shadowBox.style.filter = `blur(${(parseFloat(shadowBlur.value) * previewScale()).toFixed(1)}px)`;
-      const ox = parseFloat(shadowOffX.value) * previewScale();
-      const oy = parseFloat(shadowOffY.value) * previewScale();
+      shadowBox.style.filter = `blur(${(parseFloat(shadowBlur.value) * scale).toFixed(1)}px)`;
+      const ox = parseFloat(shadowOffX.value) * scale;
+      const oy = parseFloat(shadowOffY.value) * scale;
       shadowBox.style.transform = `translate(calc(-50% + ${ox.toFixed(1)}px), calc(-50% + ${oy.toFixed(1)}px))`;
     } else {
       shadowBox.style.opacity = 0;
     }
 
-    // title text
+    // title — anchored at (text_x, text_y) where text_y is the TOP of the text
+    const tSize = parseInt(textSize.value, 10);
+    overlayText.style.fontSize = px(tSize);
     overlayText.style.color = textColor.value;
-    overlayText.style.fontSize = px(parseInt(textSize.value, 10));
-    overlayText.style.top = "auto";
-    overlayText.style.bottom = "auto";
-    overlayText.style.transform = "none";
-    const off = px(parseInt(textOffset.value || 0, 10));
-    if (textPos.value === "top")    overlayText.style.top = off;
-    if (textPos.value === "bottom") overlayText.style.bottom = off;
-    if (textPos.value === "center") {
-      overlayText.style.top = "50%";
-      overlayText.style.transform = "translateY(-50%)";
-    }
+    overlayText.style.left = px(state.text_x);
+    overlayText.style.top  = px(state.text_y);
+    overlayText.style.transform = "translateX(-50%)";  // center horizontally on text_x
+    overlayText.style.right = "auto"; overlayText.style.bottom = "auto";
 
     const seg = state.segments[state.activeIdx];
-    const title = seg?.title || baseTitleEl.value || "Your title";
-    overlayText.style.display = showTitle.checked ? "block" : "none";
+    const titleStr = seg?.title || baseTitleEl.value || "Your title";
+    overlayText.classList.toggle("hidden-overlay", !showTitle.checked);
+    overlayText.classList.toggle("draggable", true);
     overlayText.innerHTML = textBox.checked
-      ? `<span class="pill">${escapeHtml(title)}</span>`
-      : escapeHtml(title);
+      ? `<span class="pill">${escapeHtml(titleStr)}</span>`
+      : escapeHtml(titleStr);
 
     // value labels
-    targetVal.textContent  = `${target.value}s`;
-    fgVal.textContent      = `${fgScale.value}%`;
-    blurVal.textContent    = blur.value;
-    dimVal.textContent     = `${bgDimRange.value}%`;
-    textSizeVal.textContent = `${textSize.value}px`;
-    shadowBlurVal.textContent = shadowBlur.value;
-    shadowOpVal.textContent = `${shadowOp.value}%`;
-    capSizeVal.textContent = `${capSize.value}px`;
+    targetVal.textContent      = `${target.value}s`;
+    fgVal.textContent          = `${fgScale.value}%`;
+    blurVal.textContent        = blur.value;
+    dimVal.textContent         = `${bgDimRange.value}%`;
+    textSizeVal.textContent    = `${textSize.value}px`;
+    shadowBlurVal.textContent  = shadowBlur.value;
+    shadowOpVal.textContent    = `${shadowOp.value}%`;
+    capSizeVal.textContent     = `${capSize.value}px`;
 
     updateCaptionLive();
     saveLastSettings();
   }
 
   function updateCaptionLive() {
-    if (!capOn.checked || !state.words.length) {
-      captionEl.style.display = "none";
-      return;
-    }
-    captionEl.style.display = "block";
+    const enabled = capOn.checked && state.words.length > 0;
+    captionEl.classList.toggle("hidden-overlay", !enabled);
+    if (!enabled) return;
 
     const t = fg.currentTime;
     const wpl = Math.max(1, parseInt(capWPL.value, 10));
-    let activeText = "";
+    let activeText = "", key = "";
     if (wpl === 1) {
       const w = state.words.find(w => t >= w.start && t < w.end);
-      if (w) activeText = w.word;
+      if (w) { activeText = w.word; key = `${w.start.toFixed(2)}_${w.word}`; }
     } else {
-      // group every wpl words
       for (let i = 0; i < state.words.length; i += wpl) {
         const grp = state.words.slice(i, i + wpl);
         if (!grp.length) continue;
         const s = grp[0].start, e = grp[grp.length - 1].end;
         if (t >= s && t < e) {
           activeText = grp.map(g => g.word).join(" ");
+          key = `${s.toFixed(2)}_${activeText}`;
           break;
         }
       }
@@ -238,27 +253,37 @@
     if (capUpper.checked) activeText = activeText.toUpperCase();
 
     // styling
+    const cSize = parseInt(capSize.value, 10);
     captionEl.style.color = capColor.value;
-    captionEl.style.fontSize = px(parseInt(capSize.value, 10));
+    captionEl.style.fontSize = px(cSize);
     captionEl.style.fontWeight = capBold.checked ? "800" : "500";
     captionEl.style.textShadow = buildOutlineShadow(parseInt(capOutline.value, 10), capOutlineColor.value);
-    captionEl.style.top = "auto";
-    captionEl.style.bottom = "auto";
-    captionEl.style.transform = "none";
-    const mv = px(parseInt(capMarginV.value, 10));
-    if (capPos.value === "top") captionEl.style.top = mv;
-    else if (capPos.value === "bottom") captionEl.style.bottom = mv;
-    else { captionEl.style.top = "50%"; captionEl.style.transform = "translateY(-50%)"; }
+    captionEl.style.left = px(state.caption_x);
+    captionEl.style.top = px(state.caption_y);
+    captionEl.style.right = "auto"; captionEl.style.bottom = "auto";
+    captionEl.style.transform = "translate(-50%, -50%)";
+    captionEl.classList.add("draggable");
 
-    captionEl.innerHTML = activeText ? `<span class="word">${escapeHtml(activeText)}</span>` : "";
+    // pop-in: re-render only when active word changes
+    if (key !== state.lastWordKey) {
+      state.lastWordKey = key;
+      if (activeText) {
+        const wantPop = capPop.checked;
+        captionEl.innerHTML = `<span class="word ${wantPop ? "popping" : ""}">${escapeHtml(activeText)}</span>`;
+      } else {
+        // placeholder when no current word — keeps the caption box draggable when paused
+        const sample = state.words[0]?.word || "CAPTIONS";
+        captionEl.innerHTML = `<span class="word placeholder">${escapeHtml(capUpper.checked ? sample.toUpperCase() : sample)}</span>`;
+      }
+    }
   }
 
-  // wire all the inputs
+  // ---------- inputs wiring ----------
   const liveInputs = [target, fgScale, blur, bgDimRange,
-    showTitle, textSize, textColor, textPos, textOffset, textBox,
+    showTitle, textSize, textColor, textBox,
     shadowOn, shadowBlur, shadowOp, shadowOffX, shadowOffY,
-    capOn, capSize, capColor, capOutlineColor, capOutline, capShadow,
-    capPos, capMarginV, capWPL, capBold, capUpper, capModel];
+    capOn, capSize, capColor, capOutlineColor, capOutline,
+    capWPL, capBold, capUpper, capPop, capModel];
   liveInputs.forEach(el => el.addEventListener("input", updateOverlayLive));
   baseTitleEl.addEventListener("input", () => { refreshSegmentTitles(); updateOverlayLive(); });
 
@@ -270,15 +295,77 @@
     renderSegments();
   }
 
-  // ---------- preview seek ----------
+  // ---------- anchor buttons ----------
+  document.querySelectorAll(".anchor").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.target, pos = btn.dataset.pos;
+      if (target === "title") {
+        const sz = parseInt(textSize.value, 10);
+        if (pos === "top")    state.text_y = 160;
+        if (pos === "center") state.text_y = Math.round((FRAME_H - sz * 1.4) / 2);
+        if (pos === "bottom") state.text_y = FRAME_H - 160 - Math.round(sz * 1.4);
+      } else {
+        if (pos === "top")    state.caption_y = 240;
+        if (pos === "center") state.caption_y = FRAME_H / 2;
+        if (pos === "lower")  state.caption_y = FRAME_H - 480;
+        if (pos === "bottom") state.caption_y = FRAME_H - 240;
+      }
+      updateOverlayLive();
+    });
+  });
+
+  // ---------- drag-to-move overlays ----------
+  function startDrag(el, getPos, setPos, axis = "y") {
+    let startX, startY, origX, origY;
+    el.addEventListener("mousedown", e => {
+      if (!showTitle.checked && el === overlayText) return;
+      e.preventDefault();
+      const scale = previewScale();
+      const orig = getPos();
+      origX = orig.x; origY = orig.y;
+      startX = e.clientX; startY = e.clientY;
+      el.classList.add("dragging");
+
+      function onMove(ev) {
+        const dx = (ev.clientX - startX) / scale;
+        const dy = (ev.clientY - startY) / scale;
+        const nx = clamp(origX + dx, 50, FRAME_W - 50);
+        const ny = clamp(origY + dy, 0, FRAME_H);
+        setPos(nx, ny);
+        draggingHint.textContent = `x ${nx | 0}  ·  y ${ny | 0}`;
+        draggingHint.classList.add("show");
+        updateOverlayLive();
+      }
+      function onUp() {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        el.classList.remove("dragging");
+        draggingHint.classList.remove("show");
+      }
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  }
+
+  startDrag(
+    overlayText,
+    () => ({ x: state.text_x, y: state.text_y }),
+    (x, y) => { state.text_x = x; state.text_y = y; },
+  );
+  startDrag(
+    captionEl,
+    () => ({ x: state.caption_x, y: state.caption_y }),
+    (x, y) => { state.caption_x = x; state.caption_y = y; },
+  );
+
+  // ---------- segment seek ----------
   seekStart.addEventListener("click", () => { const s = state.segments[state.activeIdx]; if (s) fg.currentTime = s.start; });
   seekEnd.addEventListener("click",   () => { const s = state.segments[state.activeIdx]; if (s) fg.currentTime = Math.max(0, s.end - 0.2); });
 
   // ---------- transcription ----------
-  transcribeBtn.addEventListener("click", async () => {
-    if (!state.video) return alert("Upload a video first.");
-    transcribeBtn.disabled = true;
-    capStatus.textContent = "queued";
+  async function autoTranscribe() {
+    if (!state.video) return;
+    capStatus.textContent = "starting transcription…";
     capFill.style.width = "0%";
     try {
       const r = await fetch("/api/transcribe", {
@@ -287,14 +374,23 @@
       });
       const data = await r.json();
       if (data.cached) {
-        await loadWords(); capStatus.textContent = `cached (${state.words.length} words)`; transcribeBtn.disabled = false; return;
+        await loadWords();
+        capStatus.textContent = `cached transcript · ${state.words.length} words`;
+        return;
       }
       state.transcribeJobId = data.job_id;
       pollTranscribe();
     } catch (e) {
       capStatus.textContent = "error: " + e.message;
-      transcribeBtn.disabled = false;
     }
+  }
+
+  transcribeBtn.addEventListener("click", async () => {
+    if (!state.video) return;
+    if (!confirm("Re-transcribe with " + capModel.value + "? This deletes the cached transcript.")) return;
+    await fetch(`/api/words/${state.video.id}`, { method: "DELETE" });
+    state.words = [];
+    autoTranscribe();
   });
 
   async function pollTranscribe() {
@@ -306,13 +402,9 @@
       if (d.status === "done") {
         await loadWords();
         capStatus.textContent = `${state.words.length} words ready`;
-        transcribeBtn.disabled = false;
         return;
       }
-      if (d.status === "error") {
-        transcribeBtn.disabled = false;
-        return;
-      }
+      if (d.status === "error") return;
     } catch (e) { console.warn(e); }
     setTimeout(pollTranscribe, 800);
   }
@@ -326,7 +418,7 @@
     updateCaptionLive();
   }
 
-  // ---------- detect & segments ----------
+  // ---------- detect / segments ----------
   detectBtn.addEventListener("click", async () => {
     if (!state.video) return;
     showLoader("analyzing scenes");
@@ -341,7 +433,6 @@
     } catch (err) { alert("Analyze failed: " + err.message); }
     finally { hideLoader(); }
   });
-
   rebuildBtn.addEventListener("click", () => buildSegments());
 
   async function buildSegments() {
@@ -357,19 +448,16 @@
           title: baseTitleEl.value || "Clip",
         }),
       });
-      const data = await r.json();
-      state.segments = data.segments || [];
+      state.segments = (await r.json()).segments || [];
       state.activeIdx = 0;
       segmentsSec.classList.remove("hidden");
-      renderSegments();
-      updateOverlayLive();
+      renderSegments(); updateOverlayLive();
     } finally { hideLoader(); }
   }
 
   function renderSegments() {
     segList.innerHTML = "";
     segCount.textContent = `(${state.segments.length})`;
-
     state.segments.forEach((seg, i) => {
       const row = document.createElement("div");
       row.className = "seg" + (i === state.activeIdx ? " active" : "");
@@ -397,7 +485,6 @@
       segList.appendChild(row);
     });
   }
-
   function setActive(i) {
     state.activeIdx = i;
     const s = state.segments[i]; if (!s) return;
@@ -418,8 +505,7 @@
       show_title: showTitle.checked,
       text_size: parseInt(textSize.value, 10),
       text_color: textColor.value,
-      text_pos: textPos.value,
-      text_offset: parseInt(textOffset.value, 10),
+      text_x: state.text_x, text_y: state.text_y,
       text_box: textBox.checked,
       shadow: {
         enabled: shadowOn.checked,
@@ -436,13 +522,14 @@
         color: capColor.value,
         outline_color: capOutlineColor.value,
         outline: parseInt(capOutline.value, 10),
-        shadow: parseInt(capShadow.value, 10),
-        position: capPos.value,
-        margin_v: parseInt(capMarginV.value, 10),
+        shadow: 2,
+        caption_x: state.caption_x,
+        caption_y: state.caption_y,
         words_per_line: parseInt(capWPL.value, 10),
         bold: capBold.checked,
         italic: false,
         uppercase: capUpper.checked,
+        pop_in: capPop.checked,
       },
     };
   }
@@ -457,28 +544,47 @@
     if (s.show_title != null) showTitle.checked = !!s.show_title;
     if (s.text_size != null) textSize.value = s.text_size;
     if (s.text_color) textColor.value = s.text_color;
-    if (s.text_pos) textPos.value = s.text_pos;
-    if (s.text_offset != null) textOffset.value = s.text_offset;
     if (s.text_box != null) textBox.checked = !!s.text_box;
+
+    // migrate old text_pos+offset → text_y if needed
+    if (s.text_y != null) state.text_y = s.text_y;
+    else if (s.text_pos) {
+      const sz = s.text_size || 76;
+      const off = s.text_offset || 180;
+      if (s.text_pos === "top") state.text_y = off;
+      else if (s.text_pos === "bottom") state.text_y = FRAME_H - off - Math.round(sz * 1.4);
+      else state.text_y = (FRAME_H - Math.round(sz * 1.4)) / 2;
+    }
+    state.text_x = s.text_x != null ? s.text_x : 540;
+
     const sh = s.shadow || {};
-    shadowOn.checked = !!sh.enabled;
+    if (sh.enabled != null) shadowOn.checked = !!sh.enabled;
     if (sh.blur != null) shadowBlur.value = sh.blur;
     if (sh.opacity != null) shadowOp.value = Math.round(sh.opacity * 100);
     if (sh.offset_x != null) shadowOffX.value = sh.offset_x;
     if (sh.offset_y != null) shadowOffY.value = sh.offset_y;
+
     const c = s.captions || {};
-    capOn.checked = !!c.enabled;
+    if (c.enabled != null) capOn.checked = !!c.enabled;
     if (c.model) capModel.value = c.model;
     if (c.size != null) capSize.value = c.size;
     if (c.color) capColor.value = c.color;
     if (c.outline_color) capOutlineColor.value = c.outline_color;
     if (c.outline != null) capOutline.value = c.outline;
-    if (c.shadow != null) capShadow.value = c.shadow;
-    if (c.position) capPos.value = c.position;
-    if (c.margin_v != null) capMarginV.value = c.margin_v;
     if (c.words_per_line != null) capWPL.value = c.words_per_line;
     if (c.bold != null) capBold.checked = !!c.bold;
     if (c.uppercase != null) capUpper.checked = !!c.uppercase;
+    if (c.pop_in != null) capPop.checked = !!c.pop_in;
+
+    if (c.caption_y != null) state.caption_y = c.caption_y;
+    else if (c.position) {
+      const sz = c.size || 110, mv = c.margin_v || 700;
+      if (c.position === "top")    state.caption_y = mv + sz / 2;
+      else if (c.position === "bottom") state.caption_y = FRAME_H - mv - sz / 2;
+      else state.caption_y = FRAME_H / 2;
+    }
+    state.caption_x = c.caption_x != null ? c.caption_x : 540;
+
     updateOverlayLive();
   }
 
@@ -487,30 +593,48 @@
     try {
       const r = await fetch("/api/presets");
       const d = await r.json();
-      presetList.innerHTML = `<option value="">— select —</option>`
-        + (d.presets || []).map(p => `<option value="${escapeHtml(p.name)}">${escapeHtml(p.name)}</option>`).join("");
+      state.presets = d.presets || [];
+      renderPresetCards();
     } catch {}
   }
 
+  function renderPresetCards() {
+    presetGrid.innerHTML = "";
+    state.presets.forEach(p => {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "preset-card" + (p.factory ? "" : " user");
+      card.innerHTML = `
+        <div class="preset-name">${escapeHtml(p.name)}</div>
+        <div class="preset-tag">${p.factory ? "factory" : "user"}</div>
+        ${p.factory ? "" : `<button class="preset-del" data-name="${escapeHtml(p.name)}" title="delete">✕</button>`}
+      `;
+      card.addEventListener("click", e => {
+        if (e.target.classList.contains("preset-del")) return;
+        applySettings(p.settings);
+      });
+      const delBtn = card.querySelector(".preset-del");
+      if (delBtn) {
+        delBtn.addEventListener("click", async e => {
+          e.stopPropagation();
+          if (!confirm(`Delete preset "${p.name}"?`)) return;
+          await fetch(`/api/presets/${encodeURIComponent(p.name)}`, { method: "DELETE" });
+          await refreshPresetList();
+        });
+      }
+      presetGrid.appendChild(card);
+    });
+  }
+
   presetSaveLocalBtn.addEventListener("click", async () => {
-    const name = (presetName.value || "preset").trim();
-    if (!name) return;
-    await fetch("/api/presets", {
+    const name = (presetName.value || "").trim();
+    if (!name) return alert("name?");
+    const r = await fetch("/api/presets", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ name, settings: getSettings() }),
     });
-    await refreshPresetList();
-    presetList.value = name;
-  });
-  presetLoadBtn.addEventListener("click", async () => {
-    const name = presetList.value; if (!name) return;
-    const r = await fetch(`/api/presets/${encodeURIComponent(name)}`);
-    if (r.ok) applySettings(await r.json());
-  });
-  presetDeleteBtn.addEventListener("click", async () => {
-    const name = presetList.value; if (!name) return;
-    if (!confirm(`Delete preset "${name}"?`)) return;
-    await fetch(`/api/presets/${encodeURIComponent(name)}`, { method: "DELETE" });
+    if (!r.ok) return alert(await r.text());
+    presetName.value = "";
     await refreshPresetList();
   });
 
@@ -518,19 +642,14 @@
     const blob = new Blob([JSON.stringify(getSettings(), null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url;
-    a.download = (baseTitleEl.value || "splitup") + ".preset.json";
+    a.href = url; a.download = (baseTitleEl.value || "splitup") + ".preset.json";
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   });
-  presetImportFile.addEventListener("change", async (e) => {
+  presetImportFile.addEventListener("change", async e => {
     const f = e.target.files?.[0]; if (!f) return;
-    try {
-      const txt = await f.text();
-      applySettings(JSON.parse(txt));
-    } catch (err) {
-      alert("Couldn't load preset: " + err.message);
-    }
+    try { applySettings(JSON.parse(await f.text())); }
+    catch (err) { alert("Couldn't load preset: " + err.message); }
     e.target.value = "";
   });
 
@@ -548,19 +667,14 @@
   renderBtn.addEventListener("click", async () => {
     if (!state.segments.length) return alert("No segments to render");
     if (capOn.checked && !state.words.length) {
-      const ok = confirm("Captions are enabled but no transcript exists yet. Render without captions?");
+      const ok = confirm("Captions enabled but transcript not ready. Render without captions?");
       if (!ok) return;
     }
     const r = await fetch("/api/render", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        id: state.video.id,
-        segments: state.segments,
-        settings: getSettings(),
-      }),
+      body: JSON.stringify({ id: state.video.id, segments: state.segments, settings: getSettings() }),
     });
-    const data = await r.json();
-    state.jobId = data.job_id;
+    state.jobId = (await r.json()).job_id;
     progressSec.classList.remove("hidden");
     errorsEl.textContent = "";
     revealBtn.disabled = true;
@@ -595,5 +709,7 @@
     });
   });
 
+  // initial render
+  refreshPresetList();
   updateOverlayLive();
 })();
