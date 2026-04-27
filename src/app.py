@@ -287,7 +287,11 @@ def factory_presets() -> dict[str, dict]:
 # ---------- routes ----------
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # Bust the browser cache: append a query param that changes whenever
+    # we touch app.js or style.css, so a redeploy never leaves a stale tab.
+    js_v  = int((ROOT / "src" / "static" / "app.js").stat().st_mtime)
+    css_v = int((ROOT / "src" / "static" / "style.css").stat().st_mtime)
+    return render_template("index.html", js_v=js_v, css_v=css_v)
 
 
 @app.route("/api/defaults")
