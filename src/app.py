@@ -97,14 +97,13 @@ JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
 
 
-# disable browser cache for static files — this is a local dev tool, no point
-# letting an old app.js stick around after we ship a change
+# disable browser cache for everything — this is a local dev tool, no point
+# letting an old app.js or HTML stick around after we ship a change
 @app.after_request
-def _no_cache_static(resp):
-    if request.path.startswith("/static/"):
-        resp.headers["Cache-Control"] = "no-store, max-age=0, must-revalidate"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["Expires"] = "0"
+def _no_cache(resp):
+    resp.headers["Cache-Control"] = "no-store, no-cache, max-age=0, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
     return resp
 
 TRANSCRIBE_JOBS: dict[str, dict] = {}
